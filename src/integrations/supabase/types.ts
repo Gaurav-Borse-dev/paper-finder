@@ -14,16 +14,145 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      academic_years: {
+        Row: {
+          created_at: string
+          id: string
+          label: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          label: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          label?: string
+        }
+        Relationships: []
+      }
+      departments: {
+        Row: {
+          created_at: string
+          id: string
+          name: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          name: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          name?: string
+        }
+        Relationships: []
+      }
+      exam_types: {
+        Row: {
+          created_at: string
+          id: string
+          name: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          name: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          name?: string
+        }
+        Relationships: []
+      }
+      papers: {
+        Row: {
+          academic_year: string
+          answer_key_source: Database["public"]["Enums"]["paper_source"] | null
+          answer_key_url: string | null
+          created_at: string
+          department: string
+          description: string | null
+          exam_date: string | null
+          exam_type: string
+          id: string
+          marks: number
+          question_paper_source: Database["public"]["Enums"]["paper_source"]
+          question_paper_url: string
+          semester: number
+          subject: string
+          updated_at: string
+        }
+        Insert: {
+          academic_year: string
+          answer_key_source?: Database["public"]["Enums"]["paper_source"] | null
+          answer_key_url?: string | null
+          created_at?: string
+          department: string
+          description?: string | null
+          exam_date?: string | null
+          exam_type: string
+          id?: string
+          marks: number
+          question_paper_source: Database["public"]["Enums"]["paper_source"]
+          question_paper_url: string
+          semester: number
+          subject: string
+          updated_at?: string
+        }
+        Update: {
+          academic_year?: string
+          answer_key_source?: Database["public"]["Enums"]["paper_source"] | null
+          answer_key_url?: string | null
+          created_at?: string
+          department?: string
+          description?: string | null
+          exam_date?: string | null
+          exam_type?: string
+          id?: string
+          marks?: number
+          question_paper_source?: Database["public"]["Enums"]["paper_source"]
+          question_paper_url?: string
+          semester?: number
+          subject?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      subjects: {
+        Row: {
+          created_at: string
+          department: string | null
+          id: string
+          name: string
+        }
+        Insert: {
+          created_at?: string
+          department?: string | null
+          id?: string
+          name: string
+        }
+        Update: {
+          created_at?: string
+          department?: string | null
+          id?: string
+          name?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      show_limit: { Args: never; Returns: number }
+      show_trgm: { Args: { "": string }; Returns: string[] }
     }
     Enums: {
-      [_ in never]: never
+      paper_source: "upload" | "gdrive"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +279,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      paper_source: ["upload", "gdrive"],
+    },
   },
 } as const
