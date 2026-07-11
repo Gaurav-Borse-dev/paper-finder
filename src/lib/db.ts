@@ -42,7 +42,7 @@ export async function fetchLookup<T extends { id: string }>(
 ): Promise<T[]> {
   const { data, error } = await supabase.from(table).select("*").order("created_at", { ascending: true });
   if (error) throw error;
-  return (data ?? []) as T[];
+  return (data ?? []) as unknown as T[];
 }
 
 /**
