@@ -1,13 +1,14 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Trash2, Upload, Edit2, X, Plus, LayoutDashboard, FileUp, ListChecks, Search } from "lucide-react";
+import { Trash2, Upload, Edit2, X, Plus, LayoutDashboard, FileUp, ListChecks, Search, ShieldAlert } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchLookup, fetchPapers, STORAGE_BUCKET, uploadPdf, type Paper, type PaperSource } from "@/lib/db";
 import { isValidDriveUrl } from "@/lib/gdrive";
 import { Logo } from "@/components/Logo";
 import { Footer } from "@/components/Footer";
+import { useSession } from "@/lib/auth";
 
 export const Route = createFileRoute("/admin")({
   component: Admin,
@@ -16,8 +17,34 @@ export const Route = createFileRoute("/admin")({
 type Tab = "dashboard" | "upload" | "manage" | "lookups";
 
 function Admin() {
+  const session = useSession();
   const [tab, setTab] = useState<Tab>("dashboard");
   const [editing, setEditing] = useState<Paper | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => { setHydrated(true); }, []);
+
+  if (hydrated && session.role !== "admin") {
+    if (session.role === "student") {
+      return (
+        <div className="flex min-h-screen items-center justify-center px-4">
+          <div className="max-w-sm rounded-2xl border border-border bg-card p-8 text-center shadow-[var(--shadow-elevated)]">
+            <ShieldAlert className="mx-auto h-8 w-8 text-destructive" />
+            <h1 className="mt-3 text-lg font-semibold">Admins only</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              This area is restricted to admin accounts.
+            </p>
+            <Link
+              to="/"
+              className="mt-5 inline-flex rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
+            >
+              Back to search
+            </Link>
+          </div>
+        </div>
+      );
+    }
+    return <Navigate to="/login" search={{ redirect: "/admin", mode: "admin" }} replace />;
+  }
 
   return (
     <div className="min-h-screen">
