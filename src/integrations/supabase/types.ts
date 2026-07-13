@@ -70,25 +70,31 @@ export type Database = {
       }
       feedbacks: {
         Row: {
+          category: string
           created_at: string
           email: string | null
           id: string
           message: string
           name: string | null
+          user_id: string | null
         }
         Insert: {
+          category?: string
           created_at?: string
           email?: string | null
           id?: string
           message: string
           name?: string | null
+          user_id?: string | null
         }
         Update: {
+          category?: string
           created_at?: string
           email?: string | null
           id?: string
           message?: string
           name?: string | null
+          user_id?: string | null
         }
         Relationships: []
       }
@@ -102,12 +108,14 @@ export type Database = {
           description: string | null
           exam_date: string | null
           exam_type: string
+          extraction_confidence: Json | null
           id: string
           marks: number
           question_paper_source: Database["public"]["Enums"]["paper_source"]
           question_paper_url: string
           semester: number
           subject: string
+          subject_code: string | null
           updated_at: string
         }
         Insert: {
@@ -119,12 +127,14 @@ export type Database = {
           description?: string | null
           exam_date?: string | null
           exam_type: string
+          extraction_confidence?: Json | null
           id?: string
           marks: number
           question_paper_source: Database["public"]["Enums"]["paper_source"]
           question_paper_url: string
           semester: number
           subject: string
+          subject_code?: string | null
           updated_at?: string
         }
         Update: {
@@ -136,13 +146,30 @@ export type Database = {
           description?: string | null
           exam_date?: string | null
           exam_type?: string
+          extraction_confidence?: Json | null
           id?: string
           marks?: number
           question_paper_source?: Database["public"]["Enums"]["paper_source"]
           question_paper_url?: string
           semester?: number
           subject?: string
+          subject_code?: string | null
           updated_at?: string
+        }
+        Relationships: []
+      }
+      pending_admins: {
+        Row: {
+          created_at: string
+          email: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
         }
         Relationships: []
       }
@@ -167,15 +194,44 @@ export type Database = {
         }
         Relationships: []
       }
+      user_roles: {
+        Row: {
+          created_at: string
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
       show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
     }
     Enums: {
+      app_role: "admin" | "student"
       paper_source: "upload" | "gdrive"
     }
     CompositeTypes: {
@@ -304,6 +360,7 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      app_role: ["admin", "student"],
       paper_source: ["upload", "gdrive"],
     },
   },
