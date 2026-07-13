@@ -301,10 +301,10 @@ function UploadForm({ initial, onDone }: { initial: Paper | null; onDone: () => 
       };
 
       if (initial) {
-        const { error } = await supabase.from("papers").update(payload).eq("id", initial.id);
+        const { error } = await supabase.from("papers").update(payload as never).eq("id", initial.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from("papers").insert(payload);
+        const { error } = await supabase.from("papers").insert(payload as never);
         if (error) throw error;
       }
     },
