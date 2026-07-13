@@ -1,68 +1,77 @@
-// Lightweight client-side auth for PaperVault.
-// The site has no per-user data — we only need to distinguish between
-// three roles for UI gating: guest, student, admin.
-// The admin credential is fixed by product spec (student project).
+// Real Supabase-backed auth for PaperVault.
+// Roles are stored in the DB `user_roles` table and read via a Supabase query.
 import { useEffect, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { supabase } from "@/integrations/supabase/client";
 
 export type Role = "guest" | "student" | "admin";
+
 export interface Session {
+  ready: boolean;
   role: Role;
+  user: User | null;
   name: string;
   email: string;
 }
 
-const STORAGE_KEY = "papervault.session";
-const ADMIN_EMAIL = "admin@gaurav";
-const ADMIN_PASSWORD = "gaurav12";
+const empty: Session = { ready: false, role: "guest", user: null, name: "", email: "" };
 
-function read(): Session {
-  if (typeof window === "undefined") return { role: "guest", name: "", email: "" };
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { role: "guest", name: "", email: "" };
-    const parsed = JSON.parse(raw) as Session;
-    if (parsed && (parsed.role === "student" || parsed.role === "admin")) return parsed;
-  } catch {
-    /* ignore */
-  }
-  return { role: "guest", name: "", email: "" };
+async function loadRole(userId: string): Promise<Role> {
+  const { data } = await supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", userId);
+  if (data?.some((r) => r.role === "admin")) return "admin";
+  if (data && data.length > 0) return "student";
+  return "student";
 }
 
-function write(session: Session) {
-  if (typeof window === "undefined") return;
-  if (session.role === "guest") window.localStorage.removeItem(STORAGE_KEY);
-  else window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
-  window.dispatchEvent(new Event("papervault:auth"));
-}
-
-export function loginStudent(name: string, email: string): Session {
-  const s: Session = { role: "student", name: name.trim() || "Student", email: email.trim() };
-  write(s);
-  return s;
-}
-
-export function loginAdmin(email: string, password: string): Session | null {
-  if (email.trim().toLowerCase() !== ADMIN_EMAIL || password !== ADMIN_PASSWORD) return null;
-  const s: Session = { role: "admin", name: "Admin", email: ADMIN_EMAIL };
-  write(s);
-  return s;
-}
-
-export function logout() {
-  write({ role: "guest", name: "", email: "" });
+function displayName(user: User): string {
+  const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+  const name = typeof meta.name === "string" ? meta.name : "";
+  if (name.trim()) return name.trim();
+  return (user.email ?? "").split("@")[0] || "User";
 }
 
 export function useSession(): Session {
-  const [session, setSession] = useState<Session>(() => ({ role: "guest", name: "", email: "" }));
+  const [session, setSession] = useState<Session>(empty);
+
   useEffect(() => {
-    setSession(read());
-    const sync = () => setSession(read());
-    window.addEventListener("papervault:auth", sync);
-    window.addEventListener("storage", sync);
+    let cancelled = false;
+
+    const hydrate = async (user: User | null) => {
+      if (!user) {
+        if (!cancelled) setSession({ ready: true, role: "guest", user: null, name: "", email: "" });
+        return;
+      }
+      const role = await loadRole(user.id);
+      if (cancelled) return;
+      setSession({
+        ready: true,
+        role,
+        user,
+        name: displayName(user),
+        email: user.email ?? "",
+      });
+    };
+
+    supabase.auth.getUser().then(({ data }) => hydrate(data.user));
+
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === "SIGNED_IN" || event === "SIGNED_OUT" || event === "USER_UPDATED" || event === "INITIAL_SESSION") {
+        hydrate(s?.user ?? null);
+      }
+    });
+
     return () => {
-      window.removeEventListener("papervault:auth", sync);
-      window.removeEventListener("storage", sync);
+      cancelled = true;
+      sub.subscription.unsubscribe();
     };
   }, []);
+
   return session;
+}
+
+export async function signOut() {
+  await supabase.auth.signOut();
 }
