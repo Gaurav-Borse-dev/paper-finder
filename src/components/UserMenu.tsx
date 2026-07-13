@@ -1,12 +1,14 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState, useRef, useEffect } from "react";
 import { LogIn, LogOut, ShieldCheck, GraduationCap, ChevronDown, UploadCloud } from "lucide-react";
-import { logout, useSession } from "@/lib/auth";
+import { signOut, useSession } from "@/lib/auth";
 import { toast } from "sonner";
+import { useQueryClient } from "@tanstack/react-query";
 
 export function UserMenu() {
   const session = useSession();
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -18,10 +20,15 @@ export function UserMenu() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
+  if (!session.ready) {
+    return <div className="h-9 w-20 animate-pulse rounded-full bg-muted" />;
+  }
+
   if (session.role === "guest") {
     return (
       <Link
-        to="/login"
+        to="/auth"
+        search={{ mode: "signin" as const }}
         className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90"
       >
         <LogIn className="h-4 w-4" /> Login
@@ -67,11 +74,13 @@ export function UserMenu() {
           )}
           <button
             type="button"
-            onClick={() => {
-              logout();
+            onClick={async () => {
               setOpen(false);
+              await qc.cancelQueries();
+              qc.clear();
+              await signOut();
               toast.success("Signed out");
-              navigate({ to: "/" });
+              navigate({ to: "/", replace: true });
             }}
             className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-destructive hover:bg-destructive/10"
           >
