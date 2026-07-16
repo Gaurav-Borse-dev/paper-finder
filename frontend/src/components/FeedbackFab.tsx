@@ -2,21 +2,12 @@ import { useState } from "react";
 import { MessageSquarePlus, X, Send } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "@/lib/auth";
-import { submitFeedback, type FeedbackCategory } from "@/services/feedback";
-
-const CATEGORIES: { value: FeedbackCategory; label: string; hint: string }[] = [
-  { value: "bug", label: "🐞 Bug", hint: "Something isn't working" },
-  { value: "missing_paper", label: "📄 Missing paper", hint: "A paper you can't find" },
-  { value: "ui_issue", label: "🎨 UI issue", hint: "Design or layout" },
-  { value: "other", label: "💬 Other", hint: "General feedback" },
-];
-
+import { submitFeedback } from "@/services/feedback";
 export function FeedbackFab() {
   const session = useSession();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [category, setCategory] = useState<FeedbackCategory>("other");
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -35,14 +26,12 @@ export function FeedbackFab() {
         name: displayName || undefined,
         email: displayEmail || undefined,
         message: message.trim(),
-        category,
         user_id: session.user?.id,
       });
       toast.success("Thanks for your feedback!");
       setMessage("");
       setName("");
       setEmail("");
-      setCategory("other");
       setOpen(false);
     } catch {
       toast.error("Could not send feedback");
@@ -88,26 +77,6 @@ export function FeedbackFab() {
             </div>
 
             <form onSubmit={submit} className="mt-5 space-y-3">
-              <div>
-                <p className="mb-2 text-xs font-medium text-muted-foreground">Category</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {CATEGORIES.map((c) => (
-                    <button
-                      key={c.value}
-                      type="button"
-                      onClick={() => setCategory(c.value)}
-                      className={`rounded-xl border px-3 py-2 text-left text-xs transition ${
-                        category === c.value
-                          ? "border-primary bg-primary/5"
-                          : "border-border bg-background hover:bg-accent"
-                      }`}
-                    >
-                      <div className="font-medium">{c.label}</div>
-                      <div className="mt-0.5 text-[10px] text-muted-foreground">{c.hint}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
 
               {session.role === "guest" && (
                 <div className="grid grid-cols-2 gap-3">

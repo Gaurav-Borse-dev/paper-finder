@@ -12,7 +12,7 @@ export function Logo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
         PV
       </span>
       <span className={`${title} font-semibold tracking-tight`}>
-        Rcpit <span className="text-primary">PaperVault</span>
+        Rcpit <span className="text-primary">PYQ Paper</span>
       </span>
     </Link>
   );

@@ -72,7 +72,7 @@ function AuthPage() {
             {tab === "signin" ? "Sign in" : "Create an account"}
           </h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            Students can browse & give feedback. Admins can upload papers.
+            Students can browse & give feedback.
           </p>
 
           <div className="mt-6 inline-flex w-full rounded-full border border-border bg-muted p-1 text-xs font-medium">
@@ -141,8 +141,7 @@ function AuthPage() {
           </form>
 
           <p className="mt-6 text-xs text-muted-foreground">
-            Admins: sign up (or sign in) with the email seeded in the migration
-            to get admin access automatically.
+          
           </p>
         </div>
       </main>

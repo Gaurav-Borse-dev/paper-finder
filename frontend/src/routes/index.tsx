@@ -92,11 +92,8 @@ function Home() {
       <main className="mx-auto max-w-6xl px-6">
         <section className="mt-4 text-center sm:mt-10">
           <h1 className="mx-auto max-w-3xl text-3xl font-semibold tracking-tight sm:text-5xl">
-            Find Previous Year Question Papers in Seconds
+            Find Previous Year Question Papers
           </h1>
-          <p className="mx-auto mt-4 max-w-2xl text-base text-muted-foreground sm:text-lg">
-            Filter by department, semester, year, exam type and marks — no folder digging.
-          </p>
         </section>
 
         {/* Filters */}

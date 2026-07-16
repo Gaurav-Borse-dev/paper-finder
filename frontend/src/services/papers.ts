@@ -124,7 +124,10 @@ export interface ExtractionResult {
 export async function extractPdfMetadata(
   pdfBase64: string,
   filename?: string
-): Promise<{ ok: true; result: ExtractionResult } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; result: ExtractionResult; usedAi?: boolean; aiUnavailable?: boolean }
+  | { ok: false; error: string }
+> {
   return apiFetch("/extract", {
     method: "POST",
     body: { pdfBase64, filename },

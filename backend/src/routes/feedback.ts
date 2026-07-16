@@ -23,7 +23,8 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     const validCategories = ["bug", "missing_paper", "ui_issue", "other"];
     const cat = validCategories.includes(category) ? category : "other";
 
-    const { data, error } = await supabase.from("feedbacks").insert({
+    const supabaseAdmin = getSupabaseAdmin();
+    const { data, error } = await supabaseAdmin.from("feedbacks").insert({
       message: message.trim(),
       category: cat,
       name: name?.trim() || null,

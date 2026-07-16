@@ -172,7 +172,7 @@ const emptyForm: FormState = {
 type ExtractStep =
   | { kind: "idle" }
   | { kind: "running"; step: string }
-  | { kind: "done"; result: ExtractionResult }
+  | { kind: "done"; result: ExtractionResult; usedAi?: boolean; aiUnavailable?: boolean }
   | { kind: "error"; message: string };
 
 function UploadForm({ initial, onDone }: { initial: Paper | null; onDone: () => void }) {
@@ -220,34 +220,53 @@ function UploadForm({ initial, onDone }: { initial: Paper | null; onDone: () => 
       return;
     }
     try {
-      setExtract({ kind: "running", step: "Reading pages…" });
+      setExtract({ kind: "running", step: "Reading PDF..." });
       const base64 = await fileToBase64(file);
-      setExtract({ kind: "running", step: "Analyzing with AI…" });
+      setExtract({ kind: "running", step: "Extracting metadata (local + AI fallback)..." });
+      
       const res = await extractPdfMetadata(base64, file.name);
       if (!res.ok) {
         setExtract({ kind: "error", message: res.error });
         return;
       }
-      setExtract({ kind: "running", step: "Auto-filling form…" });
+      
+      setExtract({ kind: "running", step: "Auto Filling Form..." });
       applyExtraction(res.result);
-      setExtract({ kind: "done", result: res.result });
-      toast.success("Metadata extracted");
+      setExtract({ 
+        kind: "done", 
+        result: res.result, 
+        usedAi: res.usedAi, 
+        aiUnavailable: res.aiUnavailable 
+      });
+
+      if (res.aiUnavailable) {
+        toast.warning("AI was unavailable. Local extraction used.");
+      } else {
+        toast.success("Completed.");
+      }
     } catch (e) {
       setExtract({ kind: "error", message: e instanceof Error ? e.message : "Extraction failed" });
     }
   };
 
   const applyExtraction = (r: ExtractionResult) => {
+    function valOrEmpty(field: ExtractionField<any>): string {
+      if (field.value === null || field.value === undefined) return "";
+      // Step 4: If confidence below 60%, leave empty
+      if (field.confidence < 0.60) return "";
+      return String(field.value);
+    }
+
     setForm((prev) => ({
       ...prev,
-      subject: prev.subject || r.subject.value || "",
-      subjectCode: prev.subjectCode || r.subject_code.value || "",
-      department: prev.department || matchLookup(deptsQ.data ?? [], "name", r.department.value) || "",
-      semester: prev.semester || (r.semester.value ? String(r.semester.value) : ""),
-      academicYear: prev.academicYear || matchLookup(yearsQ.data ?? [], "label", r.academic_year.value) || r.academic_year.value || "",
-      examType: prev.examType || matchLookup(typesQ.data ?? [], "name", r.exam_type.value) || r.exam_type.value || "",
-      marks: prev.marks || (r.marks.value ? String(r.marks.value) : ""),
-      examDate: prev.examDate || r.exam_date.value || "",
+      subject: prev.subject || valOrEmpty(r.subject),
+      subjectCode: prev.subjectCode || valOrEmpty(r.subject_code),
+      department: prev.department || matchLookup(deptsQ.data ?? [], "name", valOrEmpty(r.department)) || "",
+      semester: prev.semester || valOrEmpty(r.semester),
+      academicYear: prev.academicYear || matchLookup(yearsQ.data ?? [], "label", valOrEmpty(r.academic_year)) || valOrEmpty(r.academic_year),
+      examType: prev.examType || matchLookup(typesQ.data ?? [], "name", valOrEmpty(r.exam_type)) || valOrEmpty(r.exam_type),
+      marks: prev.marks || valOrEmpty(r.marks),
+      examDate: prev.examDate || valOrEmpty(r.exam_date),
     }));
   };
 
@@ -424,8 +443,7 @@ function ExtractionBanner({ state }: { state: ExtractStep }) {
     return (
       <div className="flex items-center gap-3 rounded-2xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
         <Loader2 className="h-4 w-4 animate-spin text-primary" />
-        <span className="font-medium">AI extraction in progress</span>
-        <span className="text-muted-foreground">— {state.step}</span>
+        <span className="font-medium text-primary">{state.step}</span>
       </div>
     );
   }
@@ -434,20 +452,50 @@ function ExtractionBanner({ state }: { state: ExtractStep }) {
       <div className="flex items-start gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
         <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <div>
-          <p className="font-medium">Unable to automatically extract metadata.</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">{state.message} — please enter the information manually.</p>
+          <p className="font-medium text-destructive">Unable to read PDF.</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">Please upload another file. ({state.message})</p>
         </div>
       </div>
     );
   }
-  const nonEmpty = Object.values(state.result).filter((f) => f.value !== null).length;
-  return (
-    <div className="flex items-center gap-3 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm">
-      <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-      <span className="font-medium">Extraction complete</span>
-      <span className="text-muted-foreground">— {nonEmpty} field{nonEmpty === 1 ? "" : "s"} detected. Review each value below before saving.</span>
-    </div>
-  );
+  if (state.kind === "done") {
+    const nonEmpty = Object.values(state.result).filter((f) => f.value !== null && f.confidence >= 0.60).length;
+
+    if (state.aiUnavailable) {
+      return (
+        <div className="flex items-start gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+          <div>
+            <p className="font-medium text-amber-800">AI service temporarily unavailable.</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">Local extraction completed successfully.</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (nonEmpty === 0) {
+      return (
+        <div className="flex items-start gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+          <div>
+            <p className="font-medium text-amber-800">Unable to detect metadata.</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">Please enter manually.</p>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex items-center gap-3 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm">
+        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+        <div>
+          <span className="font-medium text-emerald-800">Completed.</span>
+          <span className="text-muted-foreground ml-1.5">— {nonEmpty} field{nonEmpty === 1 ? "" : "s"} detected. Review each value below before saving.</span>
+        </div>
+      </div>
+    );
+  }
+  return null;
 }
 
 function confOf(state: ExtractStep, key: keyof ExtractionResult): number | null {
@@ -502,13 +550,26 @@ function Field({ label, children, className = "", confidence }: {
 function ConfidenceBadge({ confidence }: { confidence?: number | null }) {
   if (confidence === null || confidence === undefined) return null;
   if (confidence === -1) {
-    return <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">Not Detected</span>;
+    return <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive">🔴 Low</span>;
   }
   const pct = Math.round(confidence * 100);
-  const color = pct >= 85 ? "bg-emerald-500/10 text-emerald-700" : pct >= 60 ? "bg-amber-500/10 text-amber-700" : "bg-destructive/10 text-destructive";
+  if (pct >= 85) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+        🟢 High ({pct}%)
+      </span>
+    );
+  }
+  if (pct >= 60) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+        🟡 Medium ({pct}%)
+      </span>
+    );
+  }
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${color}`}>
-      <Sparkles className="h-2.5 w-2.5" /> {pct}%
+    <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive">
+      🔴 Low ({pct}%)
     </span>
   );
 }
@@ -726,7 +787,6 @@ function FeedbackList() {
             <li key={f.id} className="flex items-start justify-between gap-4 p-5">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 text-xs">
-                  <span className="rounded-full bg-primary/10 px-2 py-0.5 font-medium text-primary">{f.category}</span>
                   <span className="text-muted-foreground">{new Date(f.created_at).toLocaleString()}</span>
                 </div>
                 <p className="mt-2 whitespace-pre-wrap text-sm">{f.message}</p>
