@@ -3,10 +3,30 @@ import { getSupabaseAdmin, supabase } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import type { AuthenticatedRequest } from "../types.js";
+import { z } from "zod";
 
 const router = Router();
 
 const STORAGE_BUCKET = "papers";
+
+const uuidSchema = z.string().uuid("Invalid ID format");
+
+const createPaperSchema = z.object({
+  subject: z.string().min(1).max(200),
+  subject_code: z.string().max(20).optional().nullable(),
+  department: z.string().min(1).max(100),
+  semester: z.coerce.number().int().min(1).max(8),
+  academic_year: z.string().regex(/^\d{4}-\d{2}$/, "Must be YYYY-YY format"),
+  exam_type: z.string().min(1).max(50),
+  marks: z.coerce.number().int().min(0).max(200),
+  exam_date: z.string().optional().nullable(),
+  description: z.string().max(1000).optional().nullable(),
+  question_paper_source: z.enum(["upload", "gdrive"]),
+  question_paper_url: z.string().min(1).max(2000),
+  answer_key_source: z.enum(["upload", "gdrive"]).optional().nullable(),
+  answer_key_url: z.string().max(2000).optional().nullable(),
+  extraction_confidence: z.record(z.string(), z.unknown()).optional().nullable(),
+}).strict();
 
 /**
  * GET /api/papers
@@ -37,7 +57,12 @@ router.get("/", async (_req: Request, res: Response): Promise<void> => {
  */
 router.get("/:id", async (req: Request, res: Response): Promise<void> => {
   try {
-      const id = req.params.id as string;
+    const idResult = uuidSchema.safeParse(req.params.id);
+    if (!idResult.success) {
+      res.status(400).json({ error: "Invalid paper ID format" });
+      return;
+    }
+    const id = idResult.data;
     const { data, error } = await supabase
       .from("papers")
       .select("*")
@@ -70,8 +95,13 @@ router.get(
   "/:id/file-url",
   async (req: Request, res: Response): Promise<void> => {
     try {
-        const id = req.params.id as string;
-      const fileType = (req.query.type as string) || "question";
+      const idResult = uuidSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        res.status(400).json({ error: "Invalid paper ID format" });
+        return;
+      }
+      const id = idResult.data;
+      const fileType = (req.query.type as string) === "answer" ? "answer" : "question";
 
       const { data: paper, error } = await supabase
         .from("papers")
@@ -133,35 +163,22 @@ router.post(
   requireAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const payload = req.body;
-
-      const requiredFields = [
-        "subject",
-        "department",
-        "semester",
-        "academic_year",
-        "exam_type",
-        "marks",
-        "question_paper_source",
-        "question_paper_url",
-      ];
-
-      for (const field of requiredFields) {
-        if (!payload[field] && payload[field] !== 0) {
-          res.status(400).json({ error: `Missing required field: ${field}` });
-          return;
-        }
+      const validation = createPaperSchema.safeParse(req.body);
+      if (!validation.success) {
+        res.status(400).json({ error: validation.error.issues[0].message });
+        return;
       }
+      const payload = validation.data;
 
       const supabaseAdmin = getSupabaseAdmin();
       const { data, error } = await supabaseAdmin.from("papers").insert({
         subject: payload.subject,
         subject_code: payload.subject_code || null,
         department: payload.department,
-        semester: parseInt(payload.semester, 10),
+        semester: payload.semester,
         academic_year: payload.academic_year,
         exam_type: payload.exam_type,
-        marks: parseInt(payload.marks, 10),
+        marks: payload.marks,
         exam_date: payload.exam_date || null,
         description: payload.description || null,
         question_paper_source: payload.question_paper_source,
@@ -194,8 +211,18 @@ router.put(
   requireAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-        const id = req.params.id as string;
-      const payload = req.body;
+      const idResult = uuidSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        res.status(400).json({ error: "Invalid paper ID format" });
+        return;
+      }
+      const id = idResult.data;
+      const validation = createPaperSchema.partial().safeParse(req.body);
+      if (!validation.success) {
+        res.status(400).json({ error: validation.error.issues[0].message });
+        return;
+      }
+      const payload = validation.data;
 
       const supabaseAdmin = getSupabaseAdmin();
       const { data, error } = await supabaseAdmin
@@ -204,10 +231,10 @@ router.put(
           subject: payload.subject,
           subject_code: payload.subject_code || null,
           department: payload.department,
-          semester: parseInt(payload.semester, 10),
+          semester: payload.semester,
           academic_year: payload.academic_year,
           exam_type: payload.exam_type,
-          marks: parseInt(payload.marks, 10),
+          marks: payload.marks,
           exam_date: payload.exam_date || null,
           description: payload.description || null,
           question_paper_source: payload.question_paper_source,
@@ -243,7 +270,12 @@ router.delete(
   requireAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-        const id = req.params.id as string;
+      const idResult = uuidSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        res.status(400).json({ error: "Invalid paper ID format" });
+        return;
+      }
+      const id = idResult.data;
 
       const supabaseAdmin = getSupabaseAdmin();
 

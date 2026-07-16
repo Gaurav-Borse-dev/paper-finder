@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import { supabase, getSupabaseAdmin } from "../lib/supabase.js";
 import type { AuthenticatedRequest, ExtractionResult, ExtractionField } from "../types.js";
+import { z } from "zod";
 
 const router = Router();
 
@@ -63,18 +64,23 @@ const EMPTY_RESULT: ExtractionResult = {
  * Admin only — Hybrid local + AI-powered PDF metadata extraction
  * Body: { pdfBase64: string, filename?: string }
  */
+const extractSchema = z.object({
+  pdfBase64: z.string().min(100, "Invalid PDF payload").trim(),
+  filename: z.string().max(255).optional().nullable(),
+}).strict();
+
 router.post(
   "/",
   requireAuth,
   requireAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const { pdfBase64, filename } = req.body;
-
-      if (!pdfBase64 || typeof pdfBase64 !== "string" || pdfBase64.length < 100) {
-        res.status(400).json({ ok: false, error: "Invalid PDF payload" });
+      const validation = extractSchema.safeParse(req.body);
+      if (!validation.success) {
+        res.status(400).json({ ok: false, error: validation.error.issues[0].message });
         return;
       }
+      const { pdfBase64, filename } = validation.data;
 
       // Step 2: Local text extraction
       let localText = "";
@@ -86,7 +92,7 @@ router.post(
         await parser.destroy();
         localText = data.text || "";
         // Step 3: Heuristic extraction
-        localResult = await localExtract(localText, filename);
+        localResult = await localExtract(localText, filename || undefined);
       } catch (e) {
         console.error("Local text extraction / parsing failed:", e);
       }

@@ -3,8 +3,17 @@ import { getSupabaseAdmin, supabase } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import type { AuthenticatedRequest } from "../types.js";
+import { z } from "zod";
 
 const router = Router();
+
+const feedbackSchema = z.object({
+  message: z.string().min(1, "Message is required").max(2000).trim(),
+  category: z.enum(["bug", "missing_paper", "ui_issue", "other"]).optional().default("other"),
+  name: z.string().max(100).trim().optional().nullable(),
+  email: z.string().email("Invalid email").max(254).optional().nullable(),
+  user_id: z.string().uuid().optional().nullable(),
+}).strict();
 
 /**
  * POST /api/feedback
@@ -13,22 +22,19 @@ const router = Router();
  */
 router.post("/", async (req: Request, res: Response): Promise<void> => {
   try {
-    const { message, category, name, email, user_id } = req.body;
-
-    if (!message || typeof message !== "string" || !message.trim()) {
-      res.status(400).json({ error: "Message is required" });
+    const validation = feedbackSchema.safeParse(req.body);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error.issues[0].message });
       return;
     }
-
-    const validCategories = ["bug", "missing_paper", "ui_issue", "other"];
-    const cat = validCategories.includes(category) ? category : "other";
+    const { message, category, name, email, user_id } = validation.data;
 
     const supabaseAdmin = getSupabaseAdmin();
     const { data, error } = await supabaseAdmin.from("feedbacks").insert({
-      message: message.trim(),
-      category: cat,
-      name: name?.trim() || null,
-      email: email?.trim() || null,
+      message,
+      category: category ?? "other",
+      name: name || null,
+      email: email || null,
       user_id: user_id || null,
     }).select().single();
 

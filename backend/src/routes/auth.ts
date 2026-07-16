@@ -5,24 +5,41 @@ import type { AuthenticatedRequest } from "../types.js";
 
 const router = Router();
 
+import { z } from "zod";
+
+const signupSchema = z.object({
+  email: z.string().email("Invalid email format").trim().toLowerCase(),
+  password: z.string().min(6, "Password must be at least 6 characters"),
+  name: z.string().trim().min(1, "Name cannot be empty").optional(),
+}).strict();
+
+const signinSchema = z.object({
+  email: z.string().email("Invalid email format").trim().toLowerCase(),
+  password: z.string().min(1, "Password is required"),
+}).strict();
+
+const refreshSchema = z.object({
+  refresh_token: z.string().min(1, "Refresh token is required"),
+}).strict();
+
 /**
  * POST /api/auth/signup
  * Body: { email, password, name? }
  */
 router.post("/signup", async (req: Request, res: Response): Promise<void> => {
   try {
-    const { email, password, name } = req.body;
-
-    if (!email || !password) {
-      res.status(400).json({ error: "Email and password are required" });
+    const validation = signupSchema.safeParse(req.body);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error.issues[0].message });
       return;
     }
+    const { email, password, name } = validation.data;
 
     const { data, error } = await supabase.auth.signUp({
-      email: email.trim(),
+      email,
       password,
       options: {
-        data: name ? { name: name.trim() } : undefined,
+        data: name ? { name } : undefined,
       },
     });
 
@@ -62,15 +79,15 @@ router.post("/signup", async (req: Request, res: Response): Promise<void> => {
  */
 router.post("/signin", async (req: Request, res: Response): Promise<void> => {
   try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      res.status(400).json({ error: "Email and password are required" });
+    const validation = signinSchema.safeParse(req.body);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error.issues[0].message });
       return;
     }
+    const { email, password } = validation.data;
 
     const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
+      email,
       password,
     });
 
@@ -152,12 +169,12 @@ router.get(
  */
 router.post("/refresh", async (req: Request, res: Response): Promise<void> => {
   try {
-    const { refresh_token } = req.body;
-
-    if (!refresh_token) {
-      res.status(400).json({ error: "Refresh token is required" });
+    const validation = refreshSchema.safeParse(req.body);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error.issues[0].message });
       return;
     }
+    const { refresh_token } = validation.data;
 
     const { data, error } = await supabase.auth.refreshSession({
       refresh_token,

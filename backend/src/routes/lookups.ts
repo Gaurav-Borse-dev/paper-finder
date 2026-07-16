@@ -3,8 +3,15 @@ import { getSupabaseAdmin, supabase } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import type { AuthenticatedRequest, LookupTable } from "../types.js";
+import { z } from "zod";
 
 const router = Router();
+
+const uuidSchema = z.string().uuid("Invalid ID format");
+
+const lookupValueSchema = z.object({
+  value: z.string().min(1, "Value is required").max(200).trim(),
+}).strict();
 
 const ALLOWED_TABLES: LookupTable[] = [
   "departments",
@@ -66,23 +73,23 @@ router.post(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       const table = req.params.table as string;
-      const { value } = req.body;
 
       if (!isValidTable(table)) {
         res.status(400).json({ error: `Invalid lookup table: ${table}` });
         return;
       }
 
-      if (!value || typeof value !== "string" || !value.trim()) {
-        res.status(400).json({ error: "Value is required" });
+      const validation = lookupValueSchema.safeParse(req.body);
+      if (!validation.success) {
+        res.status(400).json({ error: validation.error.issues[0].message });
         return;
       }
-
+      const { value } = validation.data;
       const column = COLUMN_MAP[table];
       const supabaseAdmin = getSupabaseAdmin();
       const { data, error } = await supabaseAdmin
         .from(table)
-        .insert({ [column]: value.trim() } as Record<string, string>)
+        .insert({ [column]: value } as Record<string, string>)
         .select()
         .single();
 
@@ -110,7 +117,12 @@ router.delete(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       const table = req.params.table as string;
-      const id = req.params.id as string;
+      const idResult = uuidSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        res.status(400).json({ error: "Invalid ID format" });
+        return;
+      }
+      const id = idResult.data;
 
       if (!isValidTable(table)) {
         res.status(400).json({ error: `Invalid lookup table: ${table}` });
