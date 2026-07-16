@@ -3,7 +3,14 @@
  * All HTTP requests to the backend go through this module.
  */
 
-const API_BASE = "/api";
+const getApiBase = () => {
+  const url = import.meta.env.VITE_API_URL;
+  if (!url) return "/api";
+  const cleanUrl = url.replace(/\/$/, "");
+  return cleanUrl.endsWith("/api") ? cleanUrl : `${cleanUrl}/api`;
+};
+
+const API_BASE = getApiBase();
 
 // ── Token management ──
 
