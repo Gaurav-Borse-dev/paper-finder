@@ -168,14 +168,17 @@ async function listPdfFilesRecursively(
   onFolderScanned: (count: number) => void
 ): Promise<Array<{ id: string; name: string; size?: number; webViewLink?: string; path: string }>> {
   const files: Array<{ id: string; name: string; size?: number; webViewLink?: string; path: string }> = [];
-  const queue: Array<{ id: string; path: string }> = [{ id: folderId, path: "" }];
+  const visited = new Set<string>();
 
-  while (queue.length > 0) {
-    const current = queue.shift()!;
+  const scanFolder = async (id: string, path: string) => {
+    if (visited.has(id)) return;
+    visited.add(id);
+
     let nextPageToken: string | undefined;
+    const subfolders: Array<{ id: string; name: string }> = [];
 
     do {
-      const q = `'${current.id}' in parents and trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')`;
+      const q = `'${id}' in parents and trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')`;
       const url = new URL("https://www.googleapis.com/drive/v3/files");
       url.searchParams.append("q", q);
       url.searchParams.append("fields", "nextPageToken, files(id, name, mimeType, size, webViewLink)");
@@ -185,9 +188,7 @@ async function listPdfFilesRecursively(
       }
 
       const response = await fetch(url.toString(), {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
 
       if (!response.ok) {
@@ -202,8 +203,7 @@ async function listPdfFilesRecursively(
 
       for (const file of data.files) {
         if (file.mimeType === "application/vnd.google-apps.folder") {
-          const subPath = current.path ? `${current.path}/${file.name}` : file.name;
-          queue.push({ id: file.id, path: subPath });
+          subfolders.push({ id: file.id, name: file.name });
         } else if (file.mimeType === "application/pdf") {
           const sizeBytes = file.size ? parseInt(file.size, 10) : undefined;
           files.push({
@@ -211,17 +211,29 @@ async function listPdfFilesRecursively(
             name: file.name,
             size: sizeBytes,
             webViewLink: file.webViewLink,
-            path: current.path,
+            path,
           });
         }
       }
-
       nextPageToken = data.nextPageToken;
     } while (nextPageToken);
 
     onFolderScanned(files.length);
-  }
 
+    // Scan subfolders concurrently with a concurrency limit of 5
+    const limit = 5;
+    for (let i = 0; i < subfolders.length; i += limit) {
+      const chunk = subfolders.slice(i, i + limit);
+      await Promise.all(
+        chunk.map((sf) => {
+          const subPath = path ? `${path}/${sf.name}` : sf.name;
+          return scanFolder(sf.id, subPath);
+        })
+      );
+    }
+  };
+
+  await scanFolder(folderId, "");
   return files;
 }
 
@@ -296,7 +308,6 @@ async function processQueue(jobId: string, googleAccessToken: string) {
               await supabaseAdmin
                 .from("bulk_import_jobs")
                 .update({
-                  status: "paused",
                   current_step: "Rate limit hit. Pausing extraction for 60 seconds before auto-resuming...",
                   updated_at: new Date().toISOString(),
                 })
@@ -304,11 +315,10 @@ async function processQueue(jobId: string, googleAccessToken: string) {
 
               await delay(60000); // 60-second pause
 
-              // Update back to processing and retry one final time
+              // Update back to active step and retry one final time
               await supabaseAdmin
                 .from("bulk_import_jobs")
                 .update({
-                  status: "processing",
                   current_step: "Auto-resuming extraction...",
                   updated_at: new Date().toISOString(),
                 })

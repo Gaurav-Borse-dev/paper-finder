@@ -498,7 +498,46 @@ function BulkImport() {
         {/* Dynamic Progress Screen */}
         {isScanning && scanStatus && (
           <div className="max-w-2xl mx-auto my-8 bg-card border border-border rounded-2xl p-8 shadow-sm">
-            {scanStatus.status === "paused" && scanStatus.currentStep === "scan_completed" ? (
+            {scanStatus.status === "scanning" ? (
+              // Phase 1 Scanning / Crawling Screen
+              <div className="space-y-6">
+                <div>
+                  <h3 className="text-xl font-bold mb-1 flex items-center gap-2">
+                    <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                    Scanning Google Drive Folders...
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Recursively crawling directories to discover PDF files. No downloads or AI extractions are occurring yet.
+                  </p>
+                </div>
+
+                {/* Progress Bar (Infinite pulsing block) */}
+                <div className="w-full bg-muted rounded-full h-2 overflow-hidden relative">
+                  <div className="bg-primary h-2 rounded-full absolute top-0 bottom-0 left-0 w-1/3 animate-bounce" />
+                </div>
+
+                {/* Current step details */}
+                <div className="rounded-xl bg-accent p-4 border border-border">
+                  <span className="text-xs text-muted-foreground block uppercase font-bold tracking-wider mb-1">
+                    Current Action
+                  </span>
+                  <p className="text-sm font-semibold flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-primary animate-pulse" />
+                    {scanStatus.currentStep}
+                  </p>
+                </div>
+
+                <div className="flex gap-3 justify-end border-t border-border pt-4">
+                  <button
+                    onClick={handleCancelQueue}
+                    className="flex items-center gap-1.5 rounded-xl border border-border px-5 py-2.5 text-sm font-semibold hover:bg-accent text-destructive border-destructive/20"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Cancel Scan
+                  </button>
+                </div>
+              </div>
+            ) : scanStatus.status === "paused" && scanStatus.currentStep === "scan_completed" ? (
               // Phase 1 Discovery Completed Screen
               <div className="space-y-6">
                 <div>
@@ -568,12 +607,18 @@ function BulkImport() {
               <div className="space-y-6">
                 <div>
                   <h3 className="text-xl font-bold mb-1 flex items-center gap-2">
-                    {scanStatus.status === "paused" ? (
+                    {scanStatus.currentStep?.includes("Rate limit") ? (
+                      <AlertCircle className="h-5 w-5 text-amber-500 animate-pulse" />
+                    ) : scanStatus.status === "paused" ? (
                       <Pause className="h-5 w-5 text-amber-500 animate-pulse" />
                     ) : (
                       <Loader2 className="h-5 w-5 animate-spin text-primary" />
                     )}
-                    {scanStatus.status === "paused" ? "Queue Paused" : "Extracting Metadata & Parsing PDFs..."}
+                    {scanStatus.currentStep?.includes("Rate limit")
+                      ? "Rate Limit Hit — Cooling Down (60s)"
+                      : scanStatus.status === "paused"
+                      ? "Queue Paused"
+                      : "Extracting Metadata & Parsing PDFs..."}
                   </h3>
                   <p className="text-xs text-muted-foreground">
                     Using 2 concurrent rate-limited workers (1s delay). Do not close this window.
