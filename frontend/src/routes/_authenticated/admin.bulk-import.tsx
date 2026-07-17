@@ -302,11 +302,20 @@ function BulkImport() {
           clearInterval(intervalId);
         } else if (status.status === "failed") {
           setIsScanning(false);
-          toast.error(status.error || "Scanning or extraction job failed.");
+          const isAuthErr = status.error?.includes("401") || status.error?.toLowerCase().includes("invalid authentication") || status.error?.toLowerCase().includes("auth");
+          if (isAuthErr) {
+            setGoogleToken("");
+            localStorage.removeItem("gdrive_access_token");
+            toast.error("Google Drive connection expired. Please reconnect Google Drive and try again.");
+          } else {
+            toast.error(status.error || "Scanning or extraction job failed.");
+          }
+          setJobId("");
           clearInterval(intervalId);
         } else if (status.status === "cancelled") {
           setIsScanning(false);
           toast.info("Import job cancelled.");
+          setJobId("");
           clearInterval(intervalId);
         }
       } catch (err) {
