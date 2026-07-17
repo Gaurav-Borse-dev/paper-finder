@@ -9,25 +9,8 @@ import crypto from "crypto";
 
 const router = Router();
 
-interface ScanJob {
-  id: string;
-  status: "scanning" | "processing" | "completed" | "failed";
-  currentStep: string;
-  progress: number;
-  stats: {
-    totalFiles: number;
-    questionPapers: number;
-    answerKeys: number;
-    matchedPapers: number;
-    missingAnswerKeys: number;
-    duplicates: number;
-    unknownFiles: number;
-  };
-  results: any[];
-  error?: string;
-}
-
-const jobs = new Map<string, ScanJob>();
+// Track active jobs in memory to prevent duplicate runner instantiation
+const activeJobRunners = new Set<string>();
 
 function extractFolderId(url: string): string | null {
   if (!url) return null;
@@ -242,9 +225,477 @@ async function listPdfFilesRecursively(
   return files;
 }
 
+// Background Queue Processor
+async function processQueue(jobId: string, googleAccessToken: string) {
+  if (activeJobRunners.has(jobId)) return;
+  activeJobRunners.add(jobId);
+
+  const supabaseAdmin = getSupabaseAdmin();
+
+  try {
+    // 1. Fetch pending items
+    const { data: items, error: fetchErr } = await supabaseAdmin
+      .from("bulk_import_items")
+      .select("*")
+      .eq("job_id", jobId)
+      .eq("status", "pending");
+
+    if (fetchErr) throw fetchErr;
+
+    if (!items || items.length === 0) {
+      // Finalize pairing and matching
+      await finalizeMatchedResults(jobId);
+      activeJobRunners.delete(jobId);
+      return;
+    }
+
+    // Update job to processing
+    await supabaseAdmin
+      .from("bulk_import_jobs")
+      .update({
+        status: "processing",
+        current_step: "Extracting metadata from PDFs...",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+
+    // Controlled Queue setup
+    const pendingQueue = [...items];
+    const totalFilesQuery = await supabaseAdmin
+      .from("bulk_import_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId);
+
+    const totalFilesCount = totalFilesQuery.count || pendingQueue.length;
+    const concurrencyLimit = 2;
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // Exponential Backoff caller
+    const callGeminiWithRetry = async (
+      pdfBase64: string,
+      fileName: string,
+      highConfFields: any,
+      maxRetries = 3
+    ): Promise<any> => {
+      let delayMs = 2000;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          const result = await extractMetadataViaGemini(pdfBase64, fileName, highConfFields);
+          return result;
+        } catch (err: any) {
+          const is429 = err?.message?.includes("429") || err?.message?.includes("quota");
+          if (is429) {
+            if (attempt < maxRetries - 1) {
+              console.log(`[Gemini] 429 Rate Limit. Retrying in ${delayMs}ms (Attempt ${attempt + 1}/${maxRetries})`);
+              await delay(delayMs);
+              delayMs *= 2;
+              continue;
+            } else {
+              // Rate limit fully hit after retries, trigger Phase 5: Auto-pause job for 60 seconds
+              console.log(`[Gemini] Rate limit fully exhausted. Pausing queue for 60 seconds...`);
+              await supabaseAdmin
+                .from("bulk_import_jobs")
+                .update({
+                  status: "paused",
+                  current_step: "Rate limit hit. Pausing extraction for 60 seconds before auto-resuming...",
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", jobId);
+
+              await delay(60000); // 60-second pause
+
+              // Update back to processing and retry one final time
+              await supabaseAdmin
+                .from("bulk_import_jobs")
+                .update({
+                  status: "processing",
+                  current_step: "Auto-resuming extraction...",
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", jobId);
+
+              return await extractMetadataViaGemini(pdfBase64, fileName, highConfFields);
+            }
+          }
+          throw err;
+        }
+      }
+    };
+
+    const worker = async () => {
+      while (pendingQueue.length > 0) {
+        // Double-check job status to support Pause & Cancel
+        const { data: job, error: statusErr } = await supabaseAdmin
+          .from("bulk_import_jobs")
+          .select("status")
+          .eq("id", jobId)
+          .single();
+
+        if (statusErr || !job || job.status === "paused" || job.status === "cancelled") {
+          console.log(`[Worker] Worker stopping because job is ${job?.status || "undefined"}`);
+          break;
+        }
+
+        const item = pendingQueue.shift();
+        if (!item) break;
+
+        // Update item status to processing
+        await supabaseAdmin
+          .from("bulk_import_items")
+          .update({ status: "processing" })
+          .eq("id", item.id);
+
+        let localText = "";
+        let localResult: ExtractionResult | null = null;
+        let fileBuffer: Buffer | null = null;
+        let extractionError = "";
+        let usedAi = false;
+
+        try {
+          // 1. Download
+          const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
+          const downloadRes = await fetch(downloadUrl, {
+            headers: { Authorization: `Bearer ${googleAccessToken}` },
+          });
+          if (!downloadRes.ok) {
+            throw new Error(`Download failed: ${downloadRes.statusText}`);
+          }
+          const arrayBuffer = await downloadRes.arrayBuffer();
+          fileBuffer = Buffer.from(arrayBuffer);
+
+          // 2. Parse text locally
+          const parser = new PDFParse({ data: fileBuffer });
+          const textData = await parser.getText();
+          await parser.destroy();
+          localText = textData.text || "";
+
+          // 3. Local extraction
+          localResult = await localExtract(localText, item.name);
+        } catch (err: any) {
+          console.error(`Error processing file ${item.name}:`, err);
+          extractionError = err instanceof Error ? err.message : String(err);
+        }
+
+        let finalResult = localResult || {
+          subject: { value: null, confidence: 0 },
+          subject_code: { value: null, confidence: 0 },
+          department: { value: null, confidence: 0 },
+          semester: { value: null, confidence: 0 },
+          academic_year: { value: null, confidence: 0 },
+          exam_type: { value: null, confidence: 0 },
+          marks: { value: null, confidence: 0 },
+          exam_date: { value: null, confidence: 0 },
+          exam_month: { value: null, confidence: 0 },
+          exam_year: { value: null, confidence: 0 },
+        };
+
+        const classification = classifyFile(item.name, item.path, localText);
+
+        // Phase 3: Smart Extraction Threshold
+        // Calculate average local confidence of core fields
+        const coreFields = ["subject", "department", "semester", "academic_year", "exam_type"];
+        let totalConf = 0;
+        coreFields.forEach((field) => {
+          const val = finalResult[field as keyof ExtractionResult];
+          totalConf += val ? val.confidence : 0;
+        });
+        const avgConf = totalConf / coreFields.length;
+
+        // Only call Gemini if confidence is below 60% (0.60)
+        const needsAiExtraction = avgConf < 0.60 && needsAi(finalResult);
+
+        if (needsAiExtraction && fileBuffer) {
+          const geminiApiKey = process.env.GEMINI_API_KEY;
+          if (geminiApiKey) {
+            try {
+              // Delay 1 second between jobs (staggered delay)
+              await delay(1000 + Math.random() * 500);
+
+              const pdfBase64 = fileBuffer.toString("base64");
+              const highConfFields: any = {};
+              Object.keys(finalResult).forEach((key) => {
+                const field = finalResult[key as keyof ExtractionResult];
+                if (field && field.confidence >= 0.85) {
+                  highConfFields[key] = field.value;
+                }
+              });
+
+              const apiResult = await callGeminiWithRetry(pdfBase64, item.name, highConfFields);
+              if (apiResult) {
+                finalResult = mergeResults(finalResult, apiResult);
+                usedAi = true;
+              }
+            } catch (geminiErr: any) {
+              console.error(`Gemini fallback failed for ${item.name}:`, geminiErr);
+              extractionError = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
+            }
+          }
+        }
+
+        // Update item in database
+        await supabaseAdmin
+          .from("bulk_import_items")
+          .update({
+            status: extractionError && !usedAi ? "failed" : "completed",
+            metadata: finalResult,
+            type: classification,
+            error: extractionError || null,
+            used_ai: usedAi,
+          })
+          .eq("id", item.id);
+
+        // Update current progress stats
+        const { count: doneCount, error: countErr } = await supabaseAdmin
+          .from("bulk_import_items")
+          .select("id", { count: "exact", head: true })
+          .eq("job_id", jobId)
+          .in("status", ["completed", "failed", "skipped"]);
+
+        const doneCountVal = doneCount || 0;
+        const progressPercent = Math.min(Math.round(10 + (doneCountVal / totalFilesCount) * 75), 85); // 10% to 85%
+
+        await supabaseAdmin
+          .from("bulk_import_jobs")
+          .update({
+            progress: progressPercent,
+            current_step: `Processed ${doneCountVal}/${totalFilesCount} files...`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+
+        // Stagger spacing between jobs
+        await delay(1000);
+      }
+    };
+
+    // Run parallel workers (Max 2 concurrent)
+    const workers = Array(concurrencyLimit).fill(null).map(worker);
+    await Promise.all(workers);
+
+    // Finalize matched results if job completed fully without pause/cancel
+    const { data: checkJob } = await supabaseAdmin
+      .from("bulk_import_jobs")
+      .select("status")
+      .eq("id", jobId)
+      .single();
+
+    if (checkJob && checkJob.status === "processing") {
+      await finalizeMatchedResults(jobId);
+    }
+
+  } catch (err) {
+    console.error("Queue execution error:", err);
+    await supabaseAdmin
+      .from("bulk_import_jobs")
+      .update({
+        status: "failed",
+        current_step: "Extraction failed.",
+        error: err instanceof Error ? err.message : String(err),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+  } finally {
+    activeJobRunners.delete(jobId);
+  }
+}
+
+// Helper: Pair Question Papers and Answer Keys, detect duplicates and complete the job
+async function finalizeMatchedResults(jobId: string) {
+  const supabaseAdmin = getSupabaseAdmin();
+
+  // Update progress
+  await supabaseAdmin
+    .from("bulk_import_jobs")
+    .update({
+      current_step: "Matching Question Papers & Answer Keys...",
+      progress: 90,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", jobId);
+
+  // Fetch all completed items
+  const { data: items } = await supabaseAdmin
+    .from("bulk_import_items")
+    .select("*")
+    .eq("job_id", jobId);
+
+  if (!items || items.length === 0) {
+    await supabaseAdmin
+      .from("bulk_import_jobs")
+      .update({
+        status: "completed",
+        progress: 100,
+        current_step: "Completed. No items found.",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+    return;
+  }
+
+  const qps = items.filter((r) => r.type === "Question Paper");
+  const aks = items.filter((r) => r.type === "Answer Key");
+  const unknowns = items.filter((r) => r.type === "Unknown");
+
+  const matchedPapers: any[] = [];
+  const usedAkIds = new Set<string>();
+
+  for (const qp of qps) {
+    let bestAk: any = null;
+    let bestScore = -1;
+
+    for (const ak of aks) {
+      if (usedAkIds.has(ak.id)) continue;
+      const score = calculateMatchScore(qp, ak);
+      if (score >= 25 && score > bestScore) {
+        bestScore = score;
+        bestAk = ak;
+      }
+    }
+
+    if (bestAk) {
+      usedAkIds.add(bestAk.id);
+      matchedPapers.push({
+        subject: qp.metadata.subject?.value || bestAk.metadata.subject?.value || "Unknown Subject",
+        subject_code: qp.metadata.subject_code?.value || bestAk.metadata.subject_code?.value || null,
+        department: qp.metadata.department?.value || bestAk.metadata.department?.value || "Unknown",
+        semester: qp.metadata.semester?.value || bestAk.metadata.semester?.value || 1,
+        academic_year: qp.metadata.academic_year?.value || bestAk.metadata.academic_year?.value || "2024-25",
+        exam_type: qp.metadata.exam_type?.value || bestAk.metadata.exam_type?.value || "ESE",
+        marks: qp.metadata.marks?.value || bestAk.metadata.marks?.value || 70,
+        exam_date: qp.metadata.exam_date?.value || bestAk.metadata.exam_date?.value || null,
+        question_paper: {
+          id: qp.file_id,
+          name: qp.name,
+          url: qp.web_view_link || `https://drive.google.com/file/d/${qp.file_id}/view`,
+        },
+        answer_key: {
+          id: bestAk.file_id,
+          name: bestAk.name,
+          url: bestAk.web_view_link || `https://drive.google.com/file/d/${bestAk.file_id}/view`,
+        },
+        status: "Ready",
+        error: qp.error || bestAk.error || null,
+      });
+    } else {
+      matchedPapers.push({
+        subject: qp.metadata.subject?.value || "Unknown Subject",
+        subject_code: qp.metadata.subject_code?.value || null,
+        department: qp.metadata.department?.value || "Unknown",
+        semester: qp.metadata.semester?.value || 1,
+        academic_year: qp.metadata.academic_year?.value || "2024-25",
+        exam_type: qp.metadata.exam_type?.value || "ESE",
+        marks: qp.metadata.marks?.value || 70,
+        exam_date: qp.metadata.exam_date?.value || null,
+        question_paper: {
+          id: qp.file_id,
+          name: qp.name,
+          url: qp.web_view_link || `https://drive.google.com/file/d/${qp.file_id}/view`,
+        },
+        answer_key: null,
+        status: "Missing Answer Key",
+        error: qp.error || null,
+      });
+    }
+  }
+
+  // Remaining Answer Keys
+  for (const ak of aks) {
+    if (usedAkIds.has(ak.id)) continue;
+    matchedPapers.push({
+      subject: ak.metadata.subject?.value || "Unknown Subject",
+      subject_code: ak.metadata.subject_code?.value || null,
+      department: ak.metadata.department?.value || "Unknown",
+      semester: ak.metadata.semester?.value || 1,
+      academic_year: ak.metadata.academic_year?.value || "2024-25",
+      exam_type: ak.metadata.exam_type?.value || "ESE",
+      marks: ak.metadata.marks?.value || 70,
+      exam_date: ak.metadata.exam_date?.value || null,
+      question_paper: null,
+      answer_key: {
+        id: ak.file_id,
+        name: ak.name,
+        url: ak.web_view_link || `https://drive.google.com/file/d/${ak.file_id}/view`,
+      },
+      status: "Unknown Subject",
+      error: ak.error || null,
+    });
+  }
+
+  // Unknowns
+  for (const un of unknowns) {
+    matchedPapers.push({
+      subject: un.metadata.subject?.value || "Unknown Subject",
+      subject_code: un.metadata.subject_code?.value || null,
+      department: un.metadata.department?.value || "Unknown",
+      semester: un.metadata.semester?.value || 1,
+      academic_year: un.metadata.academic_year?.value || "2024-25",
+      exam_type: un.metadata.exam_type?.value || "ESE",
+      marks: un.metadata.marks?.value || 70,
+      exam_date: un.metadata.exam_date?.value || null,
+      question_paper: {
+        id: un.file_id,
+        name: un.name,
+        url: un.web_view_link || `https://drive.google.com/file/d/${un.file_id}/view`,
+      },
+      answer_key: null,
+      status: "Unknown Subject",
+      error: un.error || null,
+    });
+  }
+
+  // Duplicate detection
+  const { data: dbPapers } = await supabaseAdmin
+    .from("papers")
+    .select("id, subject, department, semester, academic_year, exam_type");
+
+  const normalizeString = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  if (dbPapers) {
+    for (const item of matchedPapers) {
+      const duplicate = dbPapers.find(
+        (p) =>
+          normalizeString(p.subject) === normalizeString(item.subject) &&
+          normalizeString(p.department) === normalizeString(item.department) &&
+          p.semester === item.semester &&
+          normalizeString(p.academic_year) === normalizeString(item.academic_year) &&
+          normalizeString(p.exam_type) === normalizeString(item.exam_type)
+      );
+
+      if (duplicate) {
+        item.status = "Duplicate";
+        item.dbPaperId = duplicate.id;
+        item.duplicateResolution = "skip";
+      }
+    }
+  }
+
+  const stats = {
+    totalFiles: items.length,
+    questionPapers: qps.length,
+    answerKeys: aks.length,
+    matchedPapers: matchedPapers.filter((p) => p.question_paper && p.answer_key).length,
+    missingAnswerKeys: matchedPapers.filter((p) => p.question_paper && !p.answer_key).length,
+    duplicates: matchedPapers.filter((p) => p.status === "Duplicate").length,
+    unknownFiles: unknowns.length,
+  };
+
+  // Update bulk_import_jobs
+  await supabaseAdmin
+    .from("bulk_import_jobs")
+    .update({
+      status: "completed",
+      current_step: "Scanning and processing completed successfully.",
+      progress: 100,
+      stats,
+      results: matchedPapers,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", jobId);
+}
+
 /**
  * POST /api/import/scan
- * Admin only — Start background Google Drive folder scanning
+ * Admin only — Phase 1: Scan Google Drive, save to bulk_import_items
  */
 router.post(
   "/scan",
@@ -264,349 +715,106 @@ router.post(
         return;
       }
 
-      const jobId = crypto.randomUUID();
-      const job: ScanJob = {
-        id: jobId,
-        status: "scanning",
-        currentStep: "Scanning Google Drive folder...",
-        progress: 5,
-        stats: {
-          totalFiles: 0,
-          questionPapers: 0,
-          answerKeys: 0,
-          matchedPapers: 0,
-          missingAnswerKeys: 0,
-          duplicates: 0,
-          unknownFiles: 0,
-        },
-        results: [],
-      };
+      const supabaseAdmin = getSupabaseAdmin();
 
-      jobs.set(jobId, job);
-      res.json({ jobId });
+      // Create new Database Bulk Import Job
+      const { data: job, error: jobErr } = await supabaseAdmin
+        .from("bulk_import_jobs")
+        .insert({
+          status: "scanning",
+          folder_url: folderUrl,
+          current_step: "Scanning Google Drive folder structure...",
+          progress: 5,
+        })
+        .select("*")
+        .single();
 
-      // Run scanning recursively in background
+      if (jobErr) throw jobErr;
+
+      res.json({ jobId: job.id });
+
+      // Run recursive scan in background
       (async () => {
         try {
-          const files = await listPdfFilesRecursively(folderId, googleAccessToken, (count) => {
-            job.currentStep = `Scanning folders... found ${count} PDF files`;
-            job.stats.totalFiles = count;
+          const files = await listPdfFilesRecursively(folderId, googleAccessToken, async (count) => {
+            await supabaseAdmin
+              .from("bulk_import_jobs")
+              .update({
+                current_step: `Scanning folders... found ${count} PDF files`,
+              })
+              .eq("id", job.id);
           });
 
           if (files.length === 0) {
-            job.status = "completed";
-            job.currentStep = "Scan complete. No PDF files found.";
-            job.progress = 100;
+            await supabaseAdmin
+              .from("bulk_import_jobs")
+              .update({
+                status: "completed",
+                current_step: "Scan complete. No PDF files found.",
+                progress: 100,
+              })
+              .eq("id", job.id);
             return;
           }
 
-          job.status = "processing";
-          job.progress = 10;
-          job.currentStep = `Discovered ${files.length} PDFs. Commencing extraction...`;
+          // Pre-classify files and bulk insert items into database
+          const itemsToInsert = files.map((file) => {
+            const preClassification = classifyFile(file.name, file.path, "");
+            return {
+              job_id: job.id,
+              file_id: file.id,
+              name: file.name,
+              path: file.path,
+              size: file.size || null,
+              web_view_link: file.webViewLink || null,
+              status: "pending",
+              type: preClassification,
+              metadata: {},
+            };
+          });
 
-          const totalFiles = files.length;
-          const pdfResults: any[] = [];
-          let processedCount = 0;
-          const concurrencyLimit = 2; // Reduced from 5 to avoid Gemini rate limits
+          // Insert in chunks of 100 to avoid limits
+          const chunkSize = 100;
+          for (let i = 0; i < itemsToInsert.length; i += chunkSize) {
+            const chunk = itemsToInsert.slice(i, i + chunkSize);
+            const { error: insErr } = await supabaseAdmin.from("bulk_import_items").insert(chunk);
+            if (insErr) throw insErr;
+          }
 
-          const filesCopy = [...files];
-
-          // Helper: delay for ms
-          const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-          // Helper: call Gemini with exponential backoff retry on 429
-          const callGeminiWithRetry = async (
-            pdfBase64: string,
-            fileName: string,
-            highConfFields: any,
-            maxRetries = 3
-          ): Promise<any> => {
-            for (let attempt = 0; attempt < maxRetries; attempt++) {
-              try {
-                const result = await extractMetadataViaGemini(pdfBase64, fileName, highConfFields);
-                return result;
-              } catch (err: any) {
-                const is429 = err?.message?.includes("429") || err?.message?.includes("quota");
-                if (is429 && attempt < maxRetries - 1) {
-                  const backoffMs = Math.min(1000 * Math.pow(2, attempt + 1), 30000); // 2s, 4s, 8s...
-                  console.log(`[Gemini] 429 rate limit for ${fileName}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries})`);
-                  await delay(backoffMs);
-                  continue;
-                }
-                throw err; // Non-429 error or exhausted retries
-              }
-            }
+          // Complete Phase 1 scan. Status transitions to paused (awaiting extraction click)
+          const stats = {
+            totalFiles: files.length,
+            questionPapers: itemsToInsert.filter((r) => r.type === "Question Paper").length,
+            answerKeys: itemsToInsert.filter((r) => r.type === "Answer Key").length,
+            matchedPapers: 0,
+            missingAnswerKeys: 0,
+            duplicates: 0,
+            unknownFiles: itemsToInsert.filter((r) => r.type === "Unknown").length,
           };
 
-          const runWorker = async () => {
-            while (filesCopy.length > 0) {
-              const file = filesCopy.shift()!;
-              let localText = "";
-              let localResult: ExtractionResult | null = null;
-              let fileBuffer: Buffer | null = null;
-              let extractionError = "";
+          await supabaseAdmin
+            .from("bulk_import_jobs")
+            .update({
+              status: "paused",
+              current_step: "scan_completed",
+              progress: 100,
+              stats,
+            })
+            .eq("id", job.id);
 
-              try {
-                // Download
-                const downloadUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`;
-                const downloadRes = await fetch(downloadUrl, {
-                  headers: { Authorization: `Bearer ${googleAccessToken}` },
-                });
-                if (!downloadRes.ok) {
-                  throw new Error(`Download failed: ${downloadRes.statusText}`);
-                }
-                const arrayBuffer = await downloadRes.arrayBuffer();
-                fileBuffer = Buffer.from(arrayBuffer);
-
-                // Parse
-                const parser = new PDFParse({ data: fileBuffer });
-                const textData = await parser.getText();
-                await parser.destroy();
-                localText = textData.text || "";
-
-                // Local extract
-                localResult = await localExtract(localText, file.name);
-              } catch (err) {
-                console.error(`Error processing file ${file.name}:`, err);
-                extractionError = err instanceof Error ? err.message : String(err);
-              }
-
-              let finalResult = localResult || {
-                subject: { value: null, confidence: 0 },
-                subject_code: { value: null, confidence: 0 },
-                department: { value: null, confidence: 0 },
-                semester: { value: null, confidence: 0 },
-                academic_year: { value: null, confidence: 0 },
-                exam_type: { value: null, confidence: 0 },
-                marks: { value: null, confidence: 0 },
-                exam_date: { value: null, confidence: 0 },
-                exam_month: { value: null, confidence: 0 },
-                exam_year: { value: null, confidence: 0 },
-              };
-
-              const requiresAi = needsAi(finalResult);
-              let usedAi = false;
-              let aiUnavailable = false;
-
-              if (requiresAi && fileBuffer) {
-                const geminiApiKey = process.env.GEMINI_API_KEY;
-                if (geminiApiKey) {
-                  try {
-                    // Add a small stagger delay to avoid burst requests
-                    await delay(500 + Math.random() * 500);
-
-                    const pdfBase64 = fileBuffer.toString("base64");
-                    const highConfFields: any = {};
-                    Object.keys(finalResult).forEach((key) => {
-                      const field = finalResult[key as keyof ExtractionResult];
-                      if (field && field.confidence >= 0.85) {
-                        highConfFields[key] = field.value;
-                      }
-                    });
-
-                    const apiResult = await callGeminiWithRetry(pdfBase64, file.name, highConfFields);
-                    if (apiResult) {
-                      finalResult = mergeResults(finalResult, apiResult);
-                      usedAi = true;
-                    }
-                  } catch (geminiErr) {
-                    console.error(`Gemini fallback failed for ${file.name}:`, geminiErr);
-                  }
-                } else {
-                  aiUnavailable = true;
-                }
-              }
-
-              const classification = classifyFile(file.name, file.path, localText);
-
-              pdfResults.push({
-                id: file.id,
-                name: file.name,
-                path: file.path,
-                webViewLink: file.webViewLink,
-                size: file.size,
-                metadata: finalResult,
-                type: classification,
-                error: extractionError || null,
-                usedAi,
-                aiUnavailable,
-              });
-
-              processedCount++;
-              job.progress = Math.round(10 + (processedCount / totalFiles) * 70); // 10% to 80%
-              job.currentStep = `Processed ${processedCount}/${totalFiles} files...`;
-            }
-          };
-
-          const workers = Array(concurrencyLimit).fill(null).map(runWorker);
-          await Promise.all(workers);
-
-          // Pairing
-          job.currentStep = "Matching Question Papers & Answer Keys...";
-          job.progress = 85;
-
-          const qps = pdfResults.filter((r) => r.type === "Question Paper");
-          const aks = pdfResults.filter((r) => r.type === "Answer Key");
-          const unknowns = pdfResults.filter((r) => r.type === "Unknown");
-
-          const matchedPapers: any[] = [];
-          const usedAkIds = new Set<string>();
-
-          for (const qp of qps) {
-            let bestAk: any = null;
-            let bestScore = -1;
-
-            for (const ak of aks) {
-              if (usedAkIds.has(ak.id)) continue;
-              const score = calculateMatchScore(qp, ak);
-              if (score >= 25 && score > bestScore) {
-                bestScore = score;
-                bestAk = ak;
-              }
-            }
-
-            if (bestAk) {
-              usedAkIds.add(bestAk.id);
-              matchedPapers.push({
-                subject: qp.metadata.subject?.value || bestAk.metadata.subject?.value || "Unknown Subject",
-                subject_code: qp.metadata.subject_code?.value || bestAk.metadata.subject_code?.value || null,
-                department: qp.metadata.department?.value || bestAk.metadata.department?.value || "Unknown",
-                semester: qp.metadata.semester?.value || bestAk.metadata.semester?.value || 1,
-                academic_year: qp.metadata.academic_year?.value || bestAk.metadata.academic_year?.value || "2024-25",
-                exam_type: qp.metadata.exam_type?.value || bestAk.metadata.exam_type?.value || "ESE",
-                marks: qp.metadata.marks?.value || bestAk.metadata.marks?.value || 70,
-                exam_date: qp.metadata.exam_date?.value || bestAk.metadata.exam_date?.value || null,
-                question_paper: {
-                  id: qp.id,
-                  name: qp.name,
-                  url: qp.webViewLink || `https://drive.google.com/file/d/${qp.id}/view`,
-                },
-                answer_key: {
-                  id: bestAk.id,
-                  name: bestAk.name,
-                  url: bestAk.webViewLink || `https://drive.google.com/file/d/${bestAk.id}/view`,
-                },
-                status: "Ready",
-                error: qp.error || bestAk.error || null,
-              });
-            } else {
-              matchedPapers.push({
-                subject: qp.metadata.subject?.value || "Unknown Subject",
-                subject_code: qp.metadata.subject_code?.value || null,
-                department: qp.metadata.department?.value || "Unknown",
-                semester: qp.metadata.semester?.value || 1,
-                academic_year: qp.metadata.academic_year?.value || "2024-25",
-                exam_type: qp.metadata.exam_type?.value || "ESE",
-                marks: qp.metadata.marks?.value || 70,
-                exam_date: qp.metadata.exam_date?.value || null,
-                question_paper: {
-                  id: qp.id,
-                  name: qp.name,
-                  url: qp.webViewLink || `https://drive.google.com/file/d/${qp.id}/view`,
-                },
-                answer_key: null,
-                status: "Missing Answer Key",
-                error: qp.error || null,
-              });
-            }
-          }
-
-          // Remaining Answer Keys that weren't paired
-          for (const ak of aks) {
-            if (usedAkIds.has(ak.id)) continue;
-            matchedPapers.push({
-              subject: ak.metadata.subject?.value || "Unknown Subject",
-              subject_code: ak.metadata.subject_code?.value || null,
-              department: ak.metadata.department?.value || "Unknown",
-              semester: ak.metadata.semester?.value || 1,
-              academic_year: ak.metadata.academic_year?.value || "2024-25",
-              exam_type: ak.metadata.exam_type?.value || "ESE",
-              marks: ak.metadata.marks?.value || 70,
-              exam_date: ak.metadata.exam_date?.value || null,
-              question_paper: null,
-              answer_key: {
-                id: ak.id,
-                name: ak.name,
-                url: ak.webViewLink || `https://drive.google.com/file/d/${ak.id}/view`,
-              },
-              status: "Unknown Subject",
-              error: ak.error || null,
-            });
-          }
-
-          // Unknowns
-          for (const un of unknowns) {
-            matchedPapers.push({
-              subject: un.metadata.subject?.value || "Unknown Subject",
-              subject_code: un.metadata.subject_code?.value || null,
-              department: un.metadata.department?.value || "Unknown",
-              semester: un.metadata.semester?.value || 1,
-              academic_year: un.metadata.academic_year?.value || "2024-25",
-              exam_type: un.metadata.exam_type?.value || "ESE",
-              marks: un.metadata.marks?.value || 70,
-              exam_date: un.metadata.exam_date?.value || null,
-              question_paper: {
-                id: un.id,
-                name: un.name,
-                url: un.webViewLink || `https://drive.google.com/file/d/${un.id}/view`,
-              },
-              answer_key: null,
-              status: "Unknown Subject",
-              error: un.error || null,
-            });
-          }
-
-          // Duplicate detection
-          job.currentStep = "Checking duplicate papers in database...";
-          job.progress = 90;
-
-          const supabaseAdmin = getSupabaseAdmin();
-          const { data: dbPapers } = await supabaseAdmin
-            .from("papers")
-            .select("id, subject, department, semester, academic_year, exam_type");
-
-          const normalizeString = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-
-          if (dbPapers) {
-            for (const item of matchedPapers) {
-              const duplicate = dbPapers.find(
-                (p) =>
-                  normalizeString(p.subject) === normalizeString(item.subject) &&
-                  normalizeString(p.department) === normalizeString(item.department) &&
-                  p.semester === item.semester &&
-                  normalizeString(p.academic_year) === normalizeString(item.academic_year) &&
-                  normalizeString(p.exam_type) === normalizeString(item.exam_type)
-              );
-
-              if (duplicate) {
-                item.status = "Duplicate";
-                item.dbPaperId = duplicate.id;
-                item.duplicateResolution = "skip";
-              }
-            }
-          }
-
-          job.stats = {
-            totalFiles: pdfResults.length,
-            questionPapers: qps.length,
-            answerKeys: aks.length,
-            matchedPapers: matchedPapers.filter((p) => p.question_paper && p.answer_key).length,
-            missingAnswerKeys: matchedPapers.filter((p) => p.question_paper && !p.answer_key).length,
-            duplicates: matchedPapers.filter((p) => p.status === "Duplicate").length,
-            unknownFiles: unknowns.length,
-          };
-
-          job.results = matchedPapers;
-          job.status = "completed";
-          job.currentStep = "Scanning and processing completed successfully.";
-          job.progress = 100;
-        } catch (err) {
-          console.error("Background scanner error:", err);
-          job.status = "failed";
-          job.error = err instanceof Error ? err.message : String(err);
-          job.currentStep = "Scanning failed.";
+        } catch (err: any) {
+          console.error("Scan Phase background error:", err);
+          await supabaseAdmin
+            .from("bulk_import_jobs")
+            .update({
+              status: "failed",
+              current_step: "Scanning failed.",
+              error: err instanceof Error ? err.message : String(err),
+            })
+            .eq("id", job.id);
         }
       })();
+
     } catch (err) {
       console.error("Error starting scan:", err);
       res.status(500).json({ error: "Failed to initialize scan" });
@@ -615,21 +823,239 @@ router.post(
 );
 
 /**
+ * POST /api/import/process/:jobId
+ * Admin only — Phase 2: Start controlled queue processing
+ */
+router.post(
+  "/process/:jobId",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const jobId = req.params.jobId as string;
+      const { googleAccessToken } = req.body;
+      if (!googleAccessToken) {
+        res.status(400).json({ error: "Missing googleAccessToken" });
+        return;
+      }
+
+      const supabaseAdmin = getSupabaseAdmin();
+
+      // Retrieve job
+      const { data: job, error: jobErr } = await supabaseAdmin
+        .from("bulk_import_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .single();
+
+      if (jobErr || !job) {
+        res.status(404).json({ error: "Job not found" });
+        return;
+      }
+
+      // Check if job can be processed
+      if (job.status !== "paused" && job.status !== "scanning") {
+        res.status(400).json({ error: `Cannot process job with status: ${job.status}` });
+        return;
+      }
+
+      res.json({ success: true, message: "Queue processing started in background" });
+
+      // Start asynchronous queue runner
+      processQueue(jobId, googleAccessToken);
+
+    } catch (err) {
+      console.error("Error starting queue processing:", err);
+      res.status(500).json({ error: "Failed to start processing" });
+    }
+  }
+);
+
+/**
+ * POST /api/import/pause/:jobId
+ * Admin only — Pause processing queue
+ */
+router.post(
+  "/pause/:jobId",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const jobId = req.params.jobId as string;
+      const supabaseAdmin = getSupabaseAdmin();
+
+      const { data: job, error: fetchErr } = await supabaseAdmin
+        .from("bulk_import_jobs")
+        .select("status")
+        .eq("id", jobId)
+        .single();
+
+      if (fetchErr || !job) {
+        res.status(404).json({ error: "Job not found" });
+        return;
+      }
+
+      if (job.status !== "processing") {
+        res.status(400).json({ error: "Only active processing jobs can be paused" });
+        return;
+      }
+
+      await supabaseAdmin
+        .from("bulk_import_jobs")
+        .update({
+          status: "paused",
+          current_step: "Processing paused by administrator.",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Error pausing job:", err);
+      res.status(500).json({ error: "Failed to pause job" });
+    }
+  }
+);
+
+/**
+ * POST /api/import/resume/:jobId
+ * Admin only — Resume processing queue
+ */
+router.post(
+  "/resume/:jobId",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const jobId = req.params.jobId as string;
+      const { googleAccessToken } = req.body;
+      if (!googleAccessToken) {
+        res.status(400).json({ error: "Missing googleAccessToken" });
+        return;
+      }
+
+      const supabaseAdmin = getSupabaseAdmin();
+
+      const { data: job, error: fetchErr } = await supabaseAdmin
+        .from("bulk_import_jobs")
+        .select("status")
+        .eq("id", jobId)
+        .single();
+
+      if (fetchErr || !job) {
+        res.status(404).json({ error: "Job not found" });
+        return;
+      }
+
+      if (job.status !== "paused") {
+        res.status(400).json({ error: "Only paused jobs can be resumed" });
+        return;
+      }
+
+      await supabaseAdmin
+        .from("bulk_import_jobs")
+        .update({
+          status: "processing",
+          current_step: "Resuming metadata extraction...",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      res.json({ success: true });
+
+      // Trigger runner in background
+      processQueue(jobId, googleAccessToken);
+    } catch (err) {
+      console.error("Error resuming job:", err);
+      res.status(500).json({ error: "Failed to resume job" });
+    }
+  }
+);
+
+/**
+ * POST /api/import/cancel/:jobId
+ * Admin only — Cancel processing queue
+ */
+router.post(
+  "/cancel/:jobId",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const jobId = req.params.jobId as string;
+      const supabaseAdmin = getSupabaseAdmin();
+
+      const { data: job, error: fetchErr } = await supabaseAdmin
+        .from("bulk_import_jobs")
+        .select("status")
+        .eq("id", jobId)
+        .single();
+
+      if (fetchErr || !job) {
+        res.status(404).json({ error: "Job not found" });
+        return;
+      }
+
+      await supabaseAdmin
+        .from("bulk_import_jobs")
+        .update({
+          status: "cancelled",
+          current_step: "Job cancelled by administrator.",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Error cancelling job:", err);
+      res.status(500).json({ error: "Failed to cancel job" });
+    }
+  }
+);
+
+/**
  * GET /api/import/status/:jobId
- * Admin only — Check background scanning status
+ * Admin only — Check background scanning status from DB
  */
 router.get(
   "/status/:jobId",
   requireAuth,
   requireAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-    const jobId = req.params.jobId as string;
-    const job = jobs.get(jobId);
-    if (!job) {
-      res.status(404).json({ error: "Job not found" });
-      return;
+    try {
+      const jobId = req.params.jobId as string;
+      const supabaseAdmin = getSupabaseAdmin();
+
+      const { data: job, error: jobErr } = await supabaseAdmin
+        .from("bulk_import_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .single();
+
+      if (jobErr || !job) {
+        res.status(404).json({ error: "Job not found" });
+        return;
+      }
+
+      // Query items count to display details if scanning is completed
+      const { data: items } = await supabaseAdmin
+        .from("bulk_import_items")
+        .select("id, name, path, status, type, error, used_ai")
+        .eq("job_id", jobId);
+
+      res.json({
+        id: job.id,
+        status: job.status,
+        currentStep: job.current_step,
+        progress: job.progress,
+        stats: job.stats,
+        results: job.results || [],
+        items: items || [],
+      });
+    } catch (err) {
+      console.error("Error fetching job status:", err);
+      res.status(500).json({ error: "Failed to fetch status" });
     }
-    res.json(job);
   }
 );
 

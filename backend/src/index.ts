@@ -94,7 +94,7 @@ app.use("/api/lookups", lookupsRoutes);
 app.use("/api/feedback", feedbackLimiter, feedbackRoutes);
 app.use("/api/upload", uploadLimiter, uploadRoutes);
 app.use("/api/extract", uploadLimiter, extractRoutes);
-app.use("/api/import", uploadLimiter, importRoutes);
+app.use("/api/import", importRoutes);
 
 // ── Health check ──
 app.get("/api/health", (_req, res) => {

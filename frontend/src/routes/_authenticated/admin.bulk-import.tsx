@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   FolderOpen, Key, RefreshCw, CheckCircle2, AlertCircle, Loader2,
-  Database, FileText, ArrowRight, Sparkles, CheckCircle
+  Database, FileText, ArrowRight, Sparkles, CheckCircle, Pause, Play, Trash2, Info
 } from "lucide-react";
 import { apiFetch } from "@/services/api";
 import { fetchLookup } from "@/services/lookups";
@@ -40,7 +40,7 @@ interface ImportPaperItem {
 
 interface JobStatusResponse {
   id: string;
-  status: "scanning" | "processing" | "completed" | "failed";
+  status: "scanning" | "processing" | "paused" | "completed" | "failed" | "cancelled";
   currentStep: string;
   progress: number;
   stats: {
@@ -53,6 +53,15 @@ interface JobStatusResponse {
     unknownFiles: number;
   };
   results: ImportPaperItem[];
+  items: Array<{
+    id: string;
+    name: string;
+    path: string;
+    status: "pending" | "processing" | "completed" | "failed" | "skipped";
+    type: string;
+    error: string | null;
+    used_ai: boolean;
+  }>;
   error?: string;
 }
 
@@ -180,7 +189,7 @@ function BulkImport() {
     }
   };
 
-  // Scan Folder initiation
+  // Scan Folder initiation (Phase 1 discovery)
   const handleStartScan = async () => {
     if (!folderUrl) {
       toast.error("Please input a Google Drive Folder URL.");
@@ -212,6 +221,63 @@ function BulkImport() {
     }
   };
 
+  // Process/Start/Resume Queue (Phase 2)
+  const handleStartExtraction = async () => {
+    if (!jobId) return;
+    try {
+      await apiFetch(`/import/process/${jobId}`, {
+        method: "POST",
+        body: { googleAccessToken: googleToken },
+      });
+      toast.success("Metadata extraction queue started!");
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err.message || "Failed to start metadata extraction.");
+    }
+  };
+
+  // Pause Queue
+  const handlePauseQueue = async () => {
+    if (!jobId) return;
+    try {
+      await apiFetch(`/import/pause/${jobId}`, { method: "POST" });
+      toast.success("Extraction queue paused.");
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err.message || "Failed to pause extraction.");
+    }
+  };
+
+  // Resume Queue
+  const handleResumeQueue = async () => {
+    if (!jobId) return;
+    try {
+      await apiFetch(`/import/resume/${jobId}`, {
+        method: "POST",
+        body: { googleAccessToken: googleToken },
+      });
+      toast.success("Extraction queue resumed.");
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err.message || "Failed to resume extraction.");
+    }
+  };
+
+  // Cancel Queue
+  const handleCancelQueue = async () => {
+    if (!jobId) return;
+    try {
+      await apiFetch(`/import/cancel/${jobId}`, { method: "POST" });
+      toast.info("Import job cancelled.");
+      setJobId("");
+      setIsScanning(false);
+      setScanStatus(null);
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err.message || "Failed to cancel import job.");
+    }
+  };
+
   // Poll job status
   useEffect(() => {
     if (!jobId || !isScanning) return;
@@ -232,11 +298,15 @@ function BulkImport() {
             }
           });
           setSelectedPaperIndices(selected);
-          toast.success("Scan completed! Ready for review.");
+          toast.success("Bulk scan and processing completed successfully!");
           clearInterval(intervalId);
         } else if (status.status === "failed") {
           setIsScanning(false);
-          toast.error(status.error || "Scanning job failed.");
+          toast.error(status.error || "Scanning or extraction job failed.");
+          clearInterval(intervalId);
+        } else if (status.status === "cancelled") {
+          setIsScanning(false);
+          toast.info("Import job cancelled.");
           clearInterval(intervalId);
         }
       } catch (err) {
@@ -427,55 +497,204 @@ function BulkImport() {
 
         {/* Dynamic Progress Screen */}
         {isScanning && scanStatus && (
-          <div className="max-w-xl mx-auto my-12 bg-card border border-border rounded-2xl p-8 shadow-sm">
-            <h3 className="text-xl font-bold mb-1 flex items-center gap-2">
-              <Loader2 className="h-5 w-5 animate-spin text-primary" />
-              Scanning Google Drive Folder...
-            </h3>
-            <p className="text-xs text-muted-foreground mb-6">
-              Processing nested structures. This may take a few minutes for larger folders.
-            </p>
-
-            <div className="space-y-6">
-              {/* Progress Bar */}
-              <div>
-                <div className="flex items-center justify-between text-xs font-medium mb-1">
-                  <span>Progress</span>
-                  <span>{scanStatus.progress}%</span>
+          <div className="max-w-2xl mx-auto my-8 bg-card border border-border rounded-2xl p-8 shadow-sm">
+            {scanStatus.status === "paused" && scanStatus.currentStep === "scan_completed" ? (
+              // Phase 1 Discovery Completed Screen
+              <div className="space-y-6">
+                <div>
+                  <h3 className="text-2xl font-bold flex items-center gap-2">
+                    <CheckCircle className="h-6 w-6 text-green-500" />
+                    Discovery Phase Completed
+                  </h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Google Drive crawl completed. We discovered <b>{scanStatus.stats?.totalFiles || 0}</b> PDF files.
+                  </p>
                 </div>
-                <div className="w-full bg-muted rounded-full h-2">
-                  <div
-                    className="bg-primary h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${scanStatus.progress}%` }}
-                  />
+
+                <div className="grid grid-cols-3 gap-4 text-xs font-semibold text-center uppercase tracking-wider">
+                  <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
+                    <span className="text-muted-foreground block text-[10px]">Question Papers</span>
+                    <span className="text-xl font-extrabold block text-primary mt-1">
+                      {scanStatus.stats?.questionPapers || 0}
+                    </span>
+                  </div>
+                  <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
+                    <span className="text-muted-foreground block text-[10px]">Answer Keys</span>
+                    <span className="text-xl font-extrabold block text-primary mt-1">
+                      {scanStatus.stats?.answerKeys || 0}
+                    </span>
+                  </div>
+                  <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
+                    <span className="text-muted-foreground block text-[10px]">Unknowns</span>
+                    <span className="text-xl font-extrabold block text-primary mt-1">
+                      {scanStatus.stats?.unknownFiles || 0}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="max-h-60 overflow-y-auto rounded-xl border border-border bg-background divide-y divide-border text-xs">
+                  {scanStatus.items?.map((item, idx) => (
+                    <div key={item.id || idx} className="p-3 flex items-center justify-between hover:bg-accent/40">
+                      <div className="truncate pr-4">
+                        <span className="font-semibold block truncate">{item.name}</span>
+                        <span className="text-muted-foreground text-[10px] truncate block">{item.path || "Root folder"}</span>
+                      </div>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-bold shrink-0">
+                        {item.type}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-3 justify-end border-t border-border pt-4">
+                  <button
+                    onClick={handleCancelQueue}
+                    className="flex items-center gap-1.5 rounded-xl border border-border px-5 py-2.5 text-sm font-semibold hover:bg-accent"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Reset
+                  </button>
+                  <button
+                    onClick={handleStartExtraction}
+                    className="flex items-center gap-1.5 rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-95"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    Start Metadata Extraction
+                  </button>
                 </div>
               </div>
-
-              {/* Status details */}
-              <div className="rounded-xl bg-accent p-4 border border-border">
-                <span className="text-xs text-muted-foreground block uppercase font-bold tracking-wider mb-1">
-                  Current Step
-                </span>
-                <p className="text-sm font-semibold flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-primary animate-pulse" />
-                  {scanStatus.currentStep}
-                </p>
-              </div>
-
-              {/* Real-time stats */}
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="rounded-lg border border-border bg-background p-3">
-                  <span className="text-muted-foreground block">Files Found</span>
-                  <span className="text-lg font-bold">{scanStatus.stats?.totalFiles || 0}</span>
+            ) : (
+              // Phase 2 Extraction / Processing Screen
+              <div className="space-y-6">
+                <div>
+                  <h3 className="text-xl font-bold mb-1 flex items-center gap-2">
+                    {scanStatus.status === "paused" ? (
+                      <Pause className="h-5 w-5 text-amber-500 animate-pulse" />
+                    ) : (
+                      <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                    )}
+                    {scanStatus.status === "paused" ? "Queue Paused" : "Extracting Metadata & Parsing PDFs..."}
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Using 2 concurrent rate-limited workers (1s delay). Do not close this window.
+                  </p>
                 </div>
-                <div className="rounded-lg border border-border bg-background p-3">
-                  <span className="text-muted-foreground block">Processed</span>
-                  <span className="text-lg font-bold">
-                    {(scanStatus.stats?.questionPapers || 0) + (scanStatus.stats?.answerKeys || 0) + (scanStatus.stats?.unknownFiles || 0)}
+
+                {/* Progress Bar */}
+                <div>
+                  <div className="flex items-center justify-between text-xs font-medium mb-1">
+                    <span>Progress</span>
+                    <span>{scanStatus.progress}%</span>
+                  </div>
+                  <div className="w-full bg-muted rounded-full h-2">
+                    <div
+                      className="bg-primary h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${scanStatus.progress}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Current step details */}
+                <div className="rounded-xl bg-accent p-4 border border-border">
+                  <span className="text-xs text-muted-foreground block uppercase font-bold tracking-wider mb-1">
+                    Current Step
                   </span>
+                  <p className="text-sm font-semibold flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-primary animate-pulse" />
+                    {scanStatus.currentStep}
+                  </p>
+                </div>
+
+                {/* Stats */}
+                <div className="grid grid-cols-4 gap-3 text-center text-xs">
+                  <div className="rounded-lg border border-border bg-background p-2">
+                    <span className="text-muted-foreground block text-[10px]">Total Files</span>
+                    <span className="text-lg font-bold">{scanStatus.stats?.totalFiles || 0}</span>
+                  </div>
+                  <div className="rounded-lg border border-border bg-background p-2">
+                    <span className="text-muted-foreground block text-[10px]">Processed</span>
+                    <span className="text-lg font-bold">
+                      {scanStatus.items?.filter((i) => i.status !== "pending" && i.status !== "processing").length || 0}
+                    </span>
+                  </div>
+                  <div className="rounded-lg border border-border bg-background p-2">
+                    <span className="text-muted-foreground block text-[10px]">AI Fallbacks</span>
+                    <span className="text-lg font-bold text-primary">
+                      {scanStatus.items?.filter((i) => i.used_ai).length || 0}
+                    </span>
+                  </div>
+                  <div className="rounded-lg border border-border bg-background p-2">
+                    <span className="text-muted-foreground block text-[10px]">Failed</span>
+                    <span className="text-lg font-bold text-destructive">
+                      {scanStatus.items?.filter((i) => i.status === "failed").length || 0}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Real-time file processing log */}
+                <div className="max-h-48 overflow-y-auto rounded-xl border border-border bg-background divide-y divide-border text-xs">
+                  {scanStatus.items?.map((item, idx) => (
+                    <div key={item.id || idx} className="p-2.5 flex items-center justify-between hover:bg-accent/40">
+                      <div className="truncate pr-4 flex items-center gap-2">
+                        {item.status === "completed" && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
+                        {item.status === "failed" && <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />}
+                        {item.status === "processing" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
+                        {item.status === "pending" && <div className="h-3.5 w-3.5 rounded-full border border-border shrink-0" />}
+                        <span className={`truncate ${item.status === "processing" ? "font-bold" : ""}`}>
+                          {item.name}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {item.used_ai && (
+                          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[9px] font-bold text-primary">
+                            AI
+                          </span>
+                        )}
+                        <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+                          item.status === "completed" ? "bg-green-500/10 text-green-600" :
+                          item.status === "failed" ? "bg-red-500/10 text-red-600" :
+                          item.status === "processing" ? "bg-primary/10 text-primary animate-pulse" :
+                          "bg-muted text-muted-foreground"
+                        }`}>
+                          {item.status}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Queue Controls */}
+                <div className="flex gap-3 justify-between border-t border-border pt-4">
+                  <button
+                    onClick={handleCancelQueue}
+                    className="flex items-center gap-1.5 rounded-xl border border-border px-5 py-2.5 text-sm font-semibold hover:bg-accent text-destructive border-destructive/20"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Cancel Import
+                  </button>
+
+                  <div className="flex gap-2">
+                    {scanStatus.status === "paused" ? (
+                      <button
+                        onClick={handleResumeQueue}
+                        className="flex items-center gap-1.5 rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-95"
+                      >
+                        <Play className="h-4 w-4" />
+                        Resume Queue
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handlePauseQueue}
+                        className="flex items-center gap-1.5 rounded-xl border border-border px-6 py-2.5 text-sm font-semibold hover:bg-accent"
+                      >
+                        <Pause className="h-4 w-4" />
+                        Pause Queue
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         )}
 
