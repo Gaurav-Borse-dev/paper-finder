@@ -57,10 +57,12 @@ interface JobStatusResponse {
 }
 
 function BulkImport() {
+  const envClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+
   // Settings & Auth States
   const [googleToken, setGoogleToken] = useState<string>(() => localStorage.getItem("gdrive_access_token") || "");
   const [clientId, setClientId] = useState<string>(() => {
-    return import.meta.env.VITE_GOOGLE_CLIENT_ID || localStorage.getItem("gdrive_client_id") || "";
+    return envClientId || localStorage.getItem("gdrive_client_id") || "";
   });
   const [folderUrl, setFolderUrl] = useState<string>(() => localStorage.getItem("gdrive_folder_url") || "");
 
@@ -94,6 +96,20 @@ function BulkImport() {
     }
   }, []);
 
+  // Log OAuth configuration on mount
+  useEffect(() => {
+    console.log("[Google OAuth Diagnostics]", {
+      loadedFromEnv: !!import.meta.env.VITE_GOOGLE_CLIENT_ID,
+      clientId: envClientId || "Not loaded from environment (using input override)",
+      origin: window.location.origin,
+      isProduction: window.location.origin === "https://rcpit-pyq-paper.onrender.com",
+    });
+
+    if (window.location.origin.includes("onrender.com") && window.location.origin !== "https://rcpit-pyq-paper.onrender.com") {
+      console.warn("[Google OAuth Diagnostics] Warning: Hostname mismatch. Expected: https://rcpit-pyq-paper.onrender.com. Current:", window.location.origin);
+    }
+  }, [envClientId]);
+
   // Fetch database lookups on mount
   useEffect(() => {
     fetchLookup<{ name: string }>("departments")
@@ -123,10 +139,23 @@ function BulkImport() {
 
   // Google OAuth Auth trigger
   const handleConnectGoogle = () => {
+    if (!envClientId) {
+      toast.error("Google OAuth Client ID environment variable (VITE_GOOGLE_CLIENT_ID) is missing. Aborting authentication.");
+      console.error("[Google OAuth Error] Missing VITE_GOOGLE_CLIENT_ID env variable.");
+      return;
+    }
+
     if (!clientId) {
       toast.error("Please configure a Google OAuth Client ID first.");
       return;
     }
+
+    console.log("[Google OAuth Setup] Initializing token client:", {
+      client_id: clientId,
+      origin: window.location.origin,
+      scope: "https://www.googleapis.com/auth/drive.readonly",
+      redirect_uri: window.location.origin
+    });
 
     try {
       const tokenClient = (window as any).google.accounts.oauth2.initTokenClient({
@@ -140,7 +169,7 @@ function BulkImport() {
           }
         },
         error_callback: (err: any) => {
-          console.error("OAuth error:", err);
+          console.error("OAuth error callback:", err);
           toast.error("Google Authentication failed");
         },
       });
@@ -346,14 +375,25 @@ function BulkImport() {
                     </label>
                     <input
                       type="text"
-                      className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-xs focus:outline-none"
+                      className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-xs focus:outline-none disabled:opacity-50"
                       placeholder="xxxxxxxx.apps.googleusercontent.com"
                       value={clientId}
                       onChange={(e) => handleSaveClientId(e.target.value)}
+                      disabled={!envClientId}
                     />
                   </div>
 
-                  {googleToken ? (
+                  {!envClientId ? (
+                    <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-xs text-destructive flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-bold block">Configuration Error</span>
+                        <span className="opacity-90">
+                          <code>VITE_GOOGLE_CLIENT_ID</code> is missing in environment. Please add it to your <code>.env</code> file and restart the server.
+                        </span>
+                      </div>
+                    </div>
+                  ) : googleToken ? (
                     <div className="rounded-lg bg-green-500/10 border border-green-500/20 p-3 text-xs text-green-600 flex items-center gap-2">
                       <CheckCircle2 className="h-4 w-4 shrink-0" />
                       <div>
@@ -373,7 +413,8 @@ function BulkImport() {
 
                   <button
                     onClick={handleConnectGoogle}
-                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-border bg-background py-2 text-xs font-medium hover:bg-accent transition-colors"
+                    disabled={!envClientId}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-border bg-background py-2 text-xs font-medium hover:bg-accent transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
                     {googleToken ? "Reconnect Google Drive" : "Connect Google Drive"}
