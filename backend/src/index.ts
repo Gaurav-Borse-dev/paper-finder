@@ -7,6 +7,7 @@ import lookupsRoutes from "./routes/lookups.js";
 import feedbackRoutes from "./routes/feedback.js";
 import uploadRoutes from "./routes/upload.js";
 import extractRoutes from "./routes/extract.js";
+import importRoutes from "./routes/import.js";
 
 import helmet from "helmet";
 import { rateLimit } from "express-rate-limit";
@@ -93,6 +94,7 @@ app.use("/api/lookups", lookupsRoutes);
 app.use("/api/feedback", feedbackLimiter, feedbackRoutes);
 app.use("/api/upload", uploadLimiter, uploadRoutes);
 app.use("/api/extract", uploadLimiter, extractRoutes);
+app.use("/api/import", uploadLimiter, importRoutes);
 
 // ── Health check ──
 app.get("/api/health", (_req, res) => {

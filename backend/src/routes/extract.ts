@@ -8,7 +8,7 @@ import { z } from "zod";
 
 const router = Router();
 
-const SYSTEM_PROMPT = `You are an expert at extracting metadata from academic examination question papers (Indian engineering colleges, RCPIT format).
+export const SYSTEM_PROMPT = `You are an expert at extracting metadata from academic examination question papers (Indian engineering colleges, RCPIT format).
 Extract these fields from the PDF. Return STRICT JSON only, no markdown, no explanation.
 
 Normalize exam_type to one of: "ESE", "RE-ESE", "Supplementary", "Complementary".
@@ -269,7 +269,7 @@ router.post(
  * Determine if AI fallback is required.
  * Returns true if any of the core fields are missing or have confidence < 60%.
  */
-function needsAi(r: ExtractionResult): boolean {
+export function needsAi(r: ExtractionResult): boolean {
   const checkFields: Array<keyof ExtractionResult> = [
     "subject",
     "exam_type",
@@ -297,7 +297,7 @@ function getHighConfFields(r: ExtractionResult) {
  * Merge local heuristic results and AI results.
  * Respects the constraint: Never overwrite fields that already have high confidence (>= 85%).
  */
-function mergeResults(local: ExtractionResult, api: ExtractionResult): ExtractionResult {
+export function mergeResults(local: ExtractionResult, api: ExtractionResult): ExtractionResult {
   const merged = { ...local };
   (Object.keys(local) as Array<keyof ExtractionResult>).forEach((k) => {
     const localField = local[k];
@@ -317,7 +317,7 @@ function mergeResults(local: ExtractionResult, api: ExtractionResult): Extractio
 /**
  * localExtract performs regular expression matches and database checks on extracted plain text
  */
-async function localExtract(text: string, filename?: string): Promise<ExtractionResult> {
+export async function localExtract(text: string, filename?: string): Promise<ExtractionResult> {
   const result: ExtractionResult = {
     subject: { value: null, confidence: 0 },
     subject_code: { value: null, confidence: 0 },
@@ -756,7 +756,7 @@ async function localExtract(text: string, filename?: string): Promise<Extraction
   return result;
 }
 
-function parseExtraction(raw: string): ExtractionResult | null {
+export function parseExtraction(raw: string): ExtractionResult | null {
   if (!raw) return null;
   const cleaned = raw
     .replace(/^```(?:json)?\s*/i, "")

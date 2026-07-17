@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useMatches, useRouter } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -27,6 +27,18 @@ function Admin() {
   const session = useSession();
   const [tab, setTab] = useState<Tab>("dashboard");
   const [editing, setEditing] = useState<Paper | null>(null);
+
+  const matches = useMatches();
+  const isExactAdmin = matches[matches.length - 1].routeId === "/_authenticated/admin";
+  const router = useRouter();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get("tab") as Tab;
+    if (tabParam && ["dashboard", "upload", "manage", "lookups", "feedback"].includes(tabParam)) {
+      setTab(tabParam);
+    }
+  }, []);
 
   if (!session.ready) {
     return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
@@ -63,20 +75,34 @@ function Admin() {
           </div>
         </div>
         <nav className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-6 pb-3">
-          <TabButton current={tab} me="dashboard" onClick={setTab} icon={<LayoutDashboard className="h-4 w-4" />}>Dashboard</TabButton>
-          <TabButton current={tab} me="upload" onClick={setTab} icon={<FileUp className="h-4 w-4" />}>Upload Paper</TabButton>
-          <TabButton current={tab} me="manage" onClick={setTab} icon={<Search className="h-4 w-4" />}>Manage Papers</TabButton>
-          <TabButton current={tab} me="lookups" onClick={setTab} icon={<ListChecks className="h-4 w-4" />}>Lookups</TabButton>
-          <TabButton current={tab} me="feedback" onClick={setTab} icon={<MessageSquare className="h-4 w-4" />}>Feedback</TabButton>
+          <TabButton current={isExactAdmin ? tab : null} me="dashboard" onClick={(t) => { if (!isExactAdmin) router.navigate({ to: "/admin", search: { tab: "dashboard" } }); else setTab(t); }} icon={<LayoutDashboard className="h-4 w-4" />}>Dashboard</TabButton>
+          <TabButton current={isExactAdmin ? tab : null} me="upload" onClick={(t) => { if (!isExactAdmin) router.navigate({ to: "/admin", search: { tab: "upload" } }); else setTab(t); }} icon={<FileUp className="h-4 w-4" />}>Upload Paper</TabButton>
+          <TabButton current={isExactAdmin ? tab : null} me="manage" onClick={(t) => { if (!isExactAdmin) router.navigate({ to: "/admin", search: { tab: "manage" } }); else setTab(t); }} icon={<Search className="h-4 w-4" />}>Manage Papers</TabButton>
+          <TabButton current={isExactAdmin ? tab : null} me="lookups" onClick={(t) => { if (!isExactAdmin) router.navigate({ to: "/admin", search: { tab: "lookups" } }); else setTab(t); }} icon={<ListChecks className="h-4 w-4" />}>Lookups</TabButton>
+          <TabButton current={isExactAdmin ? tab : null} me="feedback" onClick={(t) => { if (!isExactAdmin) router.navigate({ to: "/admin", search: { tab: "feedback" } }); else setTab(t); }} icon={<MessageSquare className="h-4 w-4" />}>Feedback</TabButton>
+          <Link
+            to="/admin/bulk-import"
+            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium transition-colors ${
+              !isExactAdmin ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+            }`}
+          >
+            <Sparkles className="h-4 w-4" /> Bulk Import
+          </Link>
         </nav>
       </header>
 
       <main className="mx-auto max-w-6xl px-6 py-8">
-        {tab === "dashboard" && <Dashboard onGoUpload={() => setTab("upload")} />}
-        {tab === "upload" && <UploadForm initial={editing} onDone={() => { setEditing(null); setTab("manage"); }} />}
-        {tab === "manage" && <ManagePapers onEdit={(p) => { setEditing(p); setTab("upload"); }} />}
-        {tab === "lookups" && <ManageLookups />}
-        {tab === "feedback" && <FeedbackList />}
+        {isExactAdmin ? (
+          <>
+            {tab === "dashboard" && <Dashboard onGoUpload={() => setTab("upload")} />}
+            {tab === "upload" && <UploadForm initial={editing} onDone={() => { setEditing(null); setTab("manage"); }} />}
+            {tab === "manage" && <ManagePapers onEdit={(p) => { setEditing(p); setTab("upload"); }} />}
+            {tab === "lookups" && <ManageLookups />}
+            {tab === "feedback" && <FeedbackList />}
+          </>
+        ) : (
+          <Outlet />
+        )}
       </main>
       <Footer />
     </div>
@@ -84,7 +110,7 @@ function Admin() {
 }
 
 function TabButton({ current, me, onClick, children, icon }: {
-  current: Tab; me: Tab; onClick: (t: Tab) => void; children: React.ReactNode; icon: React.ReactNode;
+  current: Tab | null; me: Tab; onClick: (t: Tab) => void; children: React.ReactNode; icon: React.ReactNode;
 }) {
   const active = current === me;
   return (
