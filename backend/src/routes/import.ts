@@ -1061,6 +1061,7 @@ router.get(
         stats: job.stats,
         results: job.results || [],
         items: items || [],
+        error: job.error || null,
       });
     } catch (err) {
       console.error("Error fetching job status:", err);
