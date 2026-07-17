@@ -8,6 +8,7 @@ import type { AuthenticatedRequest } from "../types.js";
 const router = Router();
 
 const STORAGE_BUCKET = "papers";
+let isBucketVerified = false;
 
 // Configure multer for memory storage (we'll forward to Supabase)
 const upload = multer({
@@ -45,6 +46,37 @@ router.post(
       const path = `papers/${Date.now()}-${crypto.randomUUID()}.pdf`;
 
       const supabaseAdmin = getSupabaseAdmin();
+
+      // Ensure the storage bucket exists
+      if (!isBucketVerified) {
+        try {
+          const { data: buckets, error: listError } = await supabaseAdmin.storage.listBuckets();
+          if (listError) {
+            console.error("Failed to list storage buckets:", listError);
+          } else {
+            const hasBucket = buckets?.some(b => b.id === STORAGE_BUCKET);
+            if (!hasBucket) {
+              console.log(`Bucket '${STORAGE_BUCKET}' not found in Supabase. Creating it...`);
+              const { error: createError } = await supabaseAdmin.storage.createBucket(STORAGE_BUCKET, {
+                public: false,
+                allowedMimeTypes: ["application/pdf"],
+                fileSizeLimit: 20 * 1024 * 1024,
+              });
+              if (createError) {
+                console.error(`Failed to auto-create bucket '${STORAGE_BUCKET}':`, createError);
+              } else {
+                console.log(`Successfully created storage bucket '${STORAGE_BUCKET}'`);
+                isBucketVerified = true;
+              }
+            } else {
+              isBucketVerified = true;
+            }
+          }
+        } catch (bucketErr) {
+          console.error("Error verifying storage bucket:", bucketErr);
+        }
+      }
+
       const { error } = await supabaseAdmin.storage
         .from(STORAGE_BUCKET)
         .upload(path, file.buffer, {
