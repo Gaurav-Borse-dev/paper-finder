@@ -130,6 +130,7 @@ app.listen(PORT, () => {
   console.log(`     /api/feedback — Feedback`);
   console.log(`     /api/upload   — File uploads`);
   console.log(`     /api/extract  — AI extraction`);
+  console.log(`     /api/import   — Bulk import`);
   console.log(`     /api/health   — Health check`);
 });
 

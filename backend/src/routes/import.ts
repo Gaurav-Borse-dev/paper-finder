@@ -307,9 +307,36 @@ router.post(
           const totalFiles = files.length;
           const pdfResults: any[] = [];
           let processedCount = 0;
-          const concurrencyLimit = 5;
+          const concurrencyLimit = 2; // Reduced from 5 to avoid Gemini rate limits
 
           const filesCopy = [...files];
+
+          // Helper: delay for ms
+          const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+          // Helper: call Gemini with exponential backoff retry on 429
+          const callGeminiWithRetry = async (
+            pdfBase64: string,
+            fileName: string,
+            highConfFields: any,
+            maxRetries = 3
+          ): Promise<any> => {
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                const result = await extractMetadataViaGemini(pdfBase64, fileName, highConfFields);
+                return result;
+              } catch (err: any) {
+                const is429 = err?.message?.includes("429") || err?.message?.includes("quota");
+                if (is429 && attempt < maxRetries - 1) {
+                  const backoffMs = Math.min(1000 * Math.pow(2, attempt + 1), 30000); // 2s, 4s, 8s...
+                  console.log(`[Gemini] 429 rate limit for ${fileName}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+                  await delay(backoffMs);
+                  continue;
+                }
+                throw err; // Non-429 error or exhausted retries
+              }
+            }
+          };
 
           const runWorker = async () => {
             while (filesCopy.length > 0) {
@@ -365,6 +392,9 @@ router.post(
                 const geminiApiKey = process.env.GEMINI_API_KEY;
                 if (geminiApiKey) {
                   try {
+                    // Add a small stagger delay to avoid burst requests
+                    await delay(500 + Math.random() * 500);
+
                     const pdfBase64 = fileBuffer.toString("base64");
                     const highConfFields: any = {};
                     Object.keys(finalResult).forEach((key) => {
@@ -374,7 +404,7 @@ router.post(
                       }
                     });
 
-                    const apiResult = await extractMetadataViaGemini(pdfBase64, file.name, highConfFields);
+                    const apiResult = await callGeminiWithRetry(pdfBase64, file.name, highConfFields);
                     if (apiResult) {
                       finalResult = mergeResults(finalResult, apiResult);
                       usedAi = true;
