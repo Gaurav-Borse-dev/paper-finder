@@ -90,25 +90,61 @@ function classifyFile(filename: string, folderPath: string, text: string): Docum
 }
 
 function calculateMatchScore(qp: any, ak: any): number {
+  // 1. Semester guardrail
+  if (
+    qp.metadata.semester?.value && 
+    ak.metadata.semester?.value && 
+    qp.metadata.semester.value !== ak.metadata.semester.value
+  ) {
+    return 0; // Mismatched semesters can never be paired!
+  }
+
+  // 2. Department guardrail
+  if (
+    qp.metadata.department?.value && 
+    ak.metadata.department?.value && 
+    qp.metadata.department.value !== ak.metadata.department.value
+  ) {
+    return 0; // Mismatched departments can never be paired!
+  }
+
+  // 3. Subject Code guardrail
+  const qpCode = (qp.metadata.subject_code?.value || "").toUpperCase().replace(/\s+/g, "");
+  const akCode = (ak.metadata.subject_code?.value || "").toUpperCase().replace(/\s+/g, "");
+  if (qpCode && akCode && qpCode !== akCode) {
+    return 0; // Mismatched known course codes can never be paired!
+  }
+
+  // 4. Subject Name guardrail
+  const qpSub = (qp.metadata.subject?.value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const akSub = (ak.metadata.subject?.value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const isQpSubKnown = qpSub && qpSub !== "unknownsubject";
+  const isAkSubKnown = akSub && akSub !== "unknownsubject";
+  
+  let subjectScore = 0;
+  if (isQpSubKnown && isAkSubKnown) {
+    if (qpSub === akSub) {
+      subjectScore = 30;
+    } else if (qpSub.includes(akSub) || akSub.includes(qpSub)) {
+      subjectScore = 15;
+    } else {
+      return 0; // Mismatched known subjects can never be paired!
+    }
+  }
+
   let score = 0;
 
-  // 1. Proximity of parent folder
+  // Proximity of parent folder
   const qpPathClean = qp.path.replace(/\b(question\s*papers?|question|qp|solutions?|answers?|ak)\b/ig, "").replace(/\/+/g, "/").trim();
   const akPathClean = ak.path.replace(/\b(question\s*papers?|question|qp|solutions?|answers?|ak)\b/ig, "").replace(/\/+/g, "/").trim();
   if (qpPathClean && qpPathClean === akPathClean) {
     score += 20;
   }
 
-  // 2. Subject Name matching
-  const qpSub = (qp.metadata.subject?.value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const akSub = (ak.metadata.subject?.value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (qpSub && qpSub === akSub) {
-    score += 30;
-  } else if (qpSub && akSub && (qpSub.includes(akSub) || akSub.includes(qpSub))) {
-    score += 15;
-  }
+  // Add subject score
+  score += subjectScore;
 
-  // 3. Filename Similarity
+  // Filename Similarity
   const cleanName = (name: string) => name.toLowerCase()
     .replace(/\.pdf$/i, "")
     .replace(/\b(solution|soln|solved|answer|key|qp|question|paper|ak)\b/ig, "")
@@ -140,14 +176,12 @@ function calculateMatchScore(qp: any, ak: any): number {
     }
   }
 
-  // 4. Subject Code (Course Code) matching
-  const qpCode = (qp.metadata.subject_code?.value || "").toUpperCase().replace(/\s+/g, "");
-  const akCode = (ak.metadata.subject_code?.value || "").toUpperCase().replace(/\s+/g, "");
+  // Subject code match score
   if (qpCode && qpCode === akCode) {
     score += 25;
   }
 
-  // 5. Context matches
+  // Context matches
   if (qp.metadata.academic_year?.value && qp.metadata.academic_year?.value === ak.metadata.academic_year?.value) {
     score += 10;
   }
@@ -239,42 +273,50 @@ async function fetchExistingPapersForFiles(fileIds: string[]) {
   const supabaseAdmin = getSupabaseAdmin();
   const dbPapersMap = new Map<string, { paper: any; role: "qp" | "ak" }>();
   
-  const chunkSize = 500;
+  if (fileIds.length === 0) return dbPapersMap;
+
+  const chunkSize = 50; // Reduced from 500 to prevent Headers Overflow Error (PGRST / URL limits)
+  const chunks: string[][] = [];
   for (let i = 0; i < fileIds.length; i += chunkSize) {
-    const chunk = fileIds.slice(i, i + chunkSize);
-    
-    // Check matching QP
-    const { data: qpMatch, error: qpErr } = await supabaseAdmin
-      .from("papers")
-      .select("id, subject, department, semester, academic_year, exam_type, marks, exam_date, question_paper_file_id, question_paper_checksum, question_paper_modified_time, question_paper_size, answer_key_file_id, answer_key_checksum, answer_key_modified_time, answer_key_size")
-      .in("question_paper_file_id", chunk);
-      
-    if (qpErr) {
-      console.error("fetchExistingPapersForFiles QP error:", qpErr);
-    } else if (qpMatch) {
-      for (const p of qpMatch) {
-        if (p.question_paper_file_id) {
-          dbPapersMap.set(p.question_paper_file_id, { paper: p, role: "qp" });
-        }
-      }
-    }
-    
-    // Check matching AK
-    const { data: akMatch, error: akErr } = await supabaseAdmin
-      .from("papers")
-      .select("id, subject, department, semester, academic_year, exam_type, marks, exam_date, question_paper_file_id, question_paper_checksum, question_paper_modified_time, question_paper_size, answer_key_file_id, answer_key_checksum, answer_key_modified_time, answer_key_size")
-      .in("answer_key_file_id", chunk);
-      
-    if (akErr) {
-      console.error("fetchExistingPapersForFiles AK error:", akErr);
-    } else if (akMatch) {
-      for (const p of akMatch) {
-        if (p.answer_key_file_id) {
-          dbPapersMap.set(p.answer_key_file_id, { paper: p, role: "ak" });
-        }
-      }
-    }
+    chunks.push(fileIds.slice(i, i + chunkSize));
   }
+
+  // Fetch QP matches and AK matches in parallel for all chunks
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      const qpPromise = supabaseAdmin
+        .from("papers")
+        .select("id, subject, department, semester, academic_year, exam_type, marks, exam_date, question_paper_file_id, question_paper_checksum, question_paper_modified_time, question_paper_size, answer_key_file_id, answer_key_checksum, answer_key_modified_time, answer_key_size")
+        .in("question_paper_file_id", chunk);
+
+      const akPromise = supabaseAdmin
+        .from("papers")
+        .select("id, subject, department, semester, academic_year, exam_type, marks, exam_date, question_paper_file_id, question_paper_checksum, question_paper_modified_time, question_paper_size, answer_key_file_id, answer_key_checksum, answer_key_modified_time, answer_key_size")
+        .in("answer_key_file_id", chunk);
+
+      const [qpResult, akResult] = await Promise.all([qpPromise, akPromise]);
+
+      if (qpResult.error) {
+        console.error("fetchExistingPapersForFiles QP error:", qpResult.error);
+      } else if (qpResult.data) {
+        for (const p of qpResult.data) {
+          if (p.question_paper_file_id) {
+            dbPapersMap.set(p.question_paper_file_id, { paper: p, role: "qp" });
+          }
+        }
+      }
+
+      if (akResult.error) {
+        console.error("fetchExistingPapersForFiles AK error:", akResult.error);
+      } else if (akResult.data) {
+        for (const p of akResult.data) {
+          if (p.answer_key_file_id) {
+            dbPapersMap.set(p.answer_key_file_id, { paper: p, role: "ak" });
+          }
+        }
+      }
+    })
+  );
   
   return dbPapersMap;
 }
@@ -547,49 +589,38 @@ async function processQueue(jobId: string, googleAccessToken: string) {
         let downloadSkipped = false;
 
         try {
-          // ===== PHASE 1: Filename + Folder Extraction (NO download) =====
-          const filenameOnlyResult = await localExtract("", item.name, item.path);
-          const filenameConf = avgConfidence(filenameOnlyResult);
+          // ===== PHASE 2: Download + Text Extraction (Always download to ensure accuracy) =====
+          const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
+          const downloadRes = await fetch(downloadUrl, {
+            headers: { Authorization: `Bearer ${googleAccessToken}` },
+          });
+          if (!downloadRes.ok) {
+            throw new Error(`Download failed: ${downloadRes.statusText}`);
+          }
+          const arrayBuffer = await downloadRes.arrayBuffer();
+          fileBuffer = Buffer.from(arrayBuffer);
 
-          if (filenameConf >= 0.70) {
-            // Filename + folder context gave sufficient confidence — skip download entirely
-            finalResult = filenameOnlyResult;
-            downloadSkipped = true;
-            console.log(`[FastPath] ${item.name} — confidence ${(filenameConf * 100).toFixed(0)}% from filename/folder. Skipping download.`);
-          } else {
-            // ===== PHASE 2: Download + Text Extraction =====
-            const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
-            const downloadRes = await fetch(downloadUrl, {
-              headers: { Authorization: `Bearer ${googleAccessToken}` },
-            });
-            if (!downloadRes.ok) {
-              throw new Error(`Download failed: ${downloadRes.statusText}`);
-            }
-            const arrayBuffer = await downloadRes.arrayBuffer();
-            fileBuffer = Buffer.from(arrayBuffer);
+          // Parse text locally (first page only for speed)
+          const parser = new PDFParse({ data: fileBuffer });
+          const textData = await parser.getText({ first: 1 });
+          await parser.destroy();
+          localText = textData.text || "";
 
-            // Parse text locally (first page only for speed)
-            const parser = new PDFParse({ data: fileBuffer });
-            const textData = await parser.getText({ first: 1 });
-            await parser.destroy();
-            localText = textData.text || "";
+          // Full local extraction with text + filename + folder path
+          finalResult = await localExtract(localText, item.name, item.path);
 
-            // Full local extraction with text + filename + folder path
-            finalResult = await localExtract(localText, item.name, item.path);
-
-            // Level 4 OCR fallback if text is extremely short (< 100 chars)
-            if (localText.trim().length < 100 && fileBuffer) {
-              console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
-              try {
-                const ocrText = await ocrViaTesseract(fileBuffer);
-                if (ocrText && ocrText.trim().length >= 50) {
-                  console.log(`[OCR] Tesseract extracted ${ocrText.trim().length} chars for ${item.name}. Re-running local extraction.`);
-                  localText = ocrText;
-                  finalResult = await localExtract(localText, item.name, item.path);
-                }
-              } catch (ocrErr) {
-                console.error(`Tesseract OCR failed for ${item.name}:`, ocrErr);
+          // Level 4 OCR fallback if text is extremely short (< 100 chars)
+          if (localText.trim().length < 100 && fileBuffer) {
+            console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
+            try {
+              const ocrText = await ocrViaTesseract(fileBuffer);
+              if (ocrText && ocrText.trim().length >= 50) {
+                console.log(`[OCR] Tesseract extracted ${ocrText.trim().length} chars for ${item.name}. Re-running local extraction.`);
+                localText = ocrText;
+                finalResult = await localExtract(localText, item.name, item.path);
               }
+            } catch (ocrErr) {
+              console.error(`Tesseract OCR failed for ${item.name}:`, ocrErr);
             }
           }
         } catch (err: any) {
