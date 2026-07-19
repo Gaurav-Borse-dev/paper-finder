@@ -1432,7 +1432,7 @@ router.get(
       // Query items count to display details if scanning is completed
       const { data: items } = await supabaseAdmin
         .from("bulk_import_items")
-        .select("id, name, path, status, type, error, used_ai")
+        .select("id, name, path, status, type, error, used_ai, metadata, created_at, file_id, size")
         .eq("job_id", jobId)
         .order("created_at", { ascending: true });
 
