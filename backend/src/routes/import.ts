@@ -1597,6 +1597,26 @@ router.post(
                 updatedQpsCount++;
               }
 
+              // Update item status in bulk_import_items to skipped (already imported)
+              const fileIdsToSkip = [];
+              if (item.question_paper?.id) fileIdsToSkip.push(item.question_paper.id);
+              if (item.answer_key?.id) fileIdsToSkip.push(item.answer_key.id);
+
+              if (fileIdsToSkip.length > 0) {
+                await supabaseAdmin
+                  .from("bulk_import_items")
+                  .update({
+                    status: "skipped",
+                    metadata: {
+                      skipReason: "already_imported",
+                      existingPaperId: item.dbPaperId,
+                      drive_checksum: item.question_paper?.checksum || item.answer_key?.checksum || null,
+                      drive_modified_time: item.question_paper?.modifiedTime || item.answer_key?.modifiedTime || null,
+                    }
+                  })
+                  .in("file_id", fileIdsToSkip);
+              }
+
               // Dynamically learn subject aliases
               await learnAliasesFromImport(item);
 
@@ -1638,12 +1658,37 @@ router.post(
             insertPayload.answer_key_size = item.answer_key.size;
           }
 
-          const { error: insErr } = await supabaseAdmin.from("papers").insert(insertPayload);
+          const { data: insData, error: insErr } = await supabaseAdmin
+            .from("papers")
+            .insert(insertPayload)
+            .select("id")
+            .single();
+
           if (insErr) throw insErr;
 
           newQpsCount++;
           if (item.answer_key?.url) {
             newAksCount++;
+          }
+
+          // Update item status in bulk_import_items to skipped (already imported)
+          const fileIdsToSkip = [];
+          if (item.question_paper?.id) fileIdsToSkip.push(item.question_paper.id);
+          if (item.answer_key?.id) fileIdsToSkip.push(item.answer_key.id);
+
+          if (fileIdsToSkip.length > 0 && insData?.id) {
+            await supabaseAdmin
+              .from("bulk_import_items")
+              .update({
+                status: "skipped",
+                metadata: {
+                  skipReason: "already_imported",
+                  existingPaperId: insData.id,
+                  drive_checksum: item.question_paper?.checksum || item.answer_key?.checksum || null,
+                  drive_modified_time: item.question_paper?.modifiedTime || item.answer_key?.modifiedTime || null,
+                }
+              })
+              .in("file_id", fileIdsToSkip);
           }
 
           // Dynamically learn subject aliases
