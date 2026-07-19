@@ -179,15 +179,27 @@ function BulkImport() {
         if (clean.includes(sub.toUpperCase())) return sub;
       }
       const abbreviations: Record<string, string> = {
-        "DBMS": "Database Management Systems",
-        "CN": "Computer Networks",
-        "ML": "Machine Learning",
-        "AI": "Artificial Intelligence",
-        "DSA": "Design and Analysis of Algorithms",
-        "OS": "Operating Systems",
+        "BEEDE": "Basic Electrical Engineering and Digital Electronics",
+        "BEEE": "Basic Electrical & Electronics Engineering",
+        "BEE and DE": "Basic Electrical Engineering and Digital Electronics",
+        "ADE": "Analog and Digital Electronics",
+        "EDC": "Electronic Devices and Circuits",
+        "DE": "Digital Electronics",
+        "ECT": "Electrical Circuit Theory",
+        "ECS": "Effective Communication Skills",
+        "CEM": "Computational Engineering Mechanics",
         "EM-I": "Engineering Mathematics I",
         "EM-II": "Engineering Mathematics II",
         "EM-III": "Engineering Mathematics III",
+        "DSA": "Data Structures and Algorithms",
+        "DBMS": "Database Management Systems",
+        "AI": "Artificial Intelligence",
+        "ML": "Machine Learning",
+        "OS": "Operating Systems",
+        "CN": "Computer Networks",
+        "IOT": "Internet of Things",
+        "DSP": "Digital Signal Processing",
+        "ADBMS": "Advanced Database Management Systems",
       };
       for (const [abbr, full] of Object.entries(abbreviations)) {
         if (clean.includes(abbr)) return full;
@@ -203,14 +215,15 @@ function BulkImport() {
     };
 
     items.forEach((item) => {
-      const isCompleted = item.status === "completed";
+      const isCompleted = item.status === "completed" || item.status === "skipped";
       const meta = item.metadata || {};
-      const subject = isCompleted ? (meta.subject?.value || "Unknown Subject") : getSubjectName(item.name);
+      const subject = isCompleted ? (meta.subject?.value || getSubjectName(item.name)) : getSubjectName(item.name);
       const department = isCompleted ? (meta.department?.value || "Unknown") : "Unknown";
       const semester = isCompleted ? (meta.semester?.value || 1) : 1;
       const academicYear = isCompleted ? (meta.academic_year?.value || "2024-25") : "2024-25";
       const examType = isCompleted ? (meta.exam_type?.value || "ESE") : "ESE";
       const marks = isCompleted ? (meta.marks?.value || 70) : 70;
+      const subjectCode = isCompleted ? (meta.subject_code?.value || null) : null;
 
       const key = `${subject}-${department}-${semester}-${academicYear}-${examType}-${marks}`;
 
@@ -218,6 +231,7 @@ function BulkImport() {
       if (!group) {
         group = {
           subject,
+          subject_code: subjectCode,
           department,
           semester,
           academic_year: academicYear,
@@ -232,6 +246,10 @@ function BulkImport() {
         subjectsMap.set(key, group);
       }
 
+      if (meta.existingPaperId) {
+        group.dbPaperId = meta.existingPaperId;
+      }
+
       group.itemsList.push(item);
 
       const fileDetails = {
@@ -242,6 +260,11 @@ function BulkImport() {
         size: item.size,
         used_ai: item.used_ai,
         error: item.error,
+        checksum: meta.drive_checksum || null,
+        modifiedTime: meta.drive_modified_time || null,
+        isUpdate: meta.isUpdate || false,
+        needsReview: meta._needs_review || false,
+        dbPaperId: meta.existingPaperId || null,
       };
 
       const isAK = isCompleted ? (item.type === "Answer Key") : isAnswerKey(item.name);
@@ -257,24 +280,56 @@ function BulkImport() {
       const ak = group.answer_key;
 
       if (qp && ak) {
-        if (qp.status === "processing" || ak.status === "processing") {
+        if (qp.status === "processing" || ak.status === "processing" || qp.status === "pending" || ak.status === "pending") {
           group.status = "Scanning";
-        } else if (qp.status === "completed" && ak.status === "completed") {
-          group.status = "Ready";
+        } else if (qp.status === "failed" || ak.status === "failed") {
+          group.status = "Failed";
+        } else if (qp.status === "skipped" && ak.status === "skipped") {
+          group.status = "Already Imported";
         } else {
-          group.status = "Searching Answer Key";
+          const hasUpdate = qp.isUpdate || ak.isUpdate;
+          const needsReview = qp.needsReview || ak.needsReview || group.subject === "Unknown Subject" || group.department === "Unknown";
+          if (needsReview) {
+            group.status = "Needs Review";
+          } else if (hasUpdate) {
+            group.status = qp.isUpdate ? "Update Question Paper" : "Attach Answer Key";
+          } else {
+            group.status = "Ready";
+          }
         }
       } else if (qp) {
         if (qp.status === "processing" || qp.status === "pending") {
-          group.status = "Searching Answer Key";
+          group.status = "Scanning";
+        } else if (qp.status === "failed") {
+          group.status = "Failed";
+        } else if (qp.status === "skipped") {
+          group.status = "Already Imported";
         } else {
-          group.status = "Import Question Paper Only";
+          const needsReview = qp.needsReview || group.subject === "Unknown Subject" || group.department === "Unknown";
+          if (needsReview) {
+            group.status = "Needs Review";
+          } else if (qp.isUpdate) {
+            group.status = "Update Question Paper";
+          } else {
+            group.status = "Import Question Paper Only";
+          }
         }
       } else if (ak) {
         if (ak.status === "processing" || ak.status === "pending") {
-          group.status = "Searching Question Paper";
+          group.status = "Scanning";
+        } else if (ak.status === "failed") {
+          group.status = "Failed";
+        } else if (ak.status === "skipped") {
+          group.status = "Already Imported";
         } else {
-          group.status = "Waiting for Question Paper";
+          const needsReview = ak.needsReview || group.subject === "Unknown Subject" || group.department === "Unknown";
+          if (needsReview) {
+            group.status = "Needs Review";
+          } else if (ak.isUpdate) {
+            group.status = "Attach Answer Key";
+          } else {
+            group.status = "Waiting for Question Paper";
+          }
         }
       }
 
@@ -298,7 +353,7 @@ function BulkImport() {
   };
 
   const displaySubjects: any[] = isScanning
-    ? groupDiscoveredItemsIntoSubjects(scanStatus?.items || [])
+    ? groupDiscoveredItemsIntoSubjects(scanStatus?.items || []).map((s, idx) => ({ ...s, keyIndex: idx }))
     : papersList.map((item, idx) => ({
         ...item,
         keyIndex: idx,
@@ -401,10 +456,32 @@ function BulkImport() {
   };
 
   const handleSelectAll = () => {
-    if (selectedPaperIndices.size === displaySubjects.length) {
-      setSelectedPaperIndices(new Set());
+    const importableIndices = displaySubjects
+      .map((sub, idx) => ({ sub, idx }))
+      .filter(({ sub }) => {
+        return (
+          sub.status !== "Scanning" &&
+          sub.status !== "Searching Answer Key" &&
+          sub.status !== "Searching Question Paper" &&
+          sub.status !== "Already Imported" &&
+          sub.status !== "Duplicate"
+        );
+      })
+      .map(({ idx }) => idx);
+
+    const allImportableSelected = importableIndices.every(idx => selectedPaperIndices.has(idx));
+    if (allImportableSelected && importableIndices.length > 0) {
+      setSelectedPaperIndices(prev => {
+        const copy = new Set(prev);
+        importableIndices.forEach(idx => copy.delete(idx));
+        return copy;
+      });
     } else {
-      setSelectedPaperIndices(new Set(displaySubjects.map((_, idx) => idx)));
+      setSelectedPaperIndices(prev => {
+        const copy = new Set(prev);
+        importableIndices.forEach(idx => copy.add(idx));
+        return copy;
+      });
     }
   };
 
@@ -484,7 +561,38 @@ function BulkImport() {
   };
 
   const handleExecuteImport = async () => {
-    const papersToImport = papersList.filter((_, idx) => selectedPaperIndices.has(idx));
+    const papersToImport = displaySubjects
+      .filter((_, idx) => selectedPaperIndices.has(idx))
+      .map((s) => ({
+        subject: s.subject,
+        subject_code: s.subject_code || null,
+        department: s.department,
+        semester: Number(s.semester),
+        academic_year: s.academic_year,
+        exam_type: s.exam_type,
+        marks: Number(s.marks),
+        exam_date: s.exam_date || null,
+        question_paper: s.question_paper ? {
+          id: s.question_paper.id,
+          name: s.question_paper.name,
+          url: s.question_paper.url,
+          checksum: s.question_paper.checksum || null,
+          modifiedTime: s.question_paper.modifiedTime || null,
+          size: s.question_paper.size || null,
+        } : null,
+        answer_key: s.answer_key ? {
+          id: s.answer_key.id,
+          name: s.answer_key.name,
+          url: s.answer_key.url,
+          checksum: s.answer_key.checksum || null,
+          modifiedTime: s.answer_key.modifiedTime || null,
+          size: s.answer_key.size || null,
+        } : null,
+        status: s.status,
+        dbPaperId: s.dbPaperId || null,
+        duplicateResolution: s.duplicateResolution || (s.status === "Duplicate" ? "skip" : "update"),
+      }));
+
     if (papersToImport.length === 0) {
       toast.error("No subjects selected for import.");
       return;
@@ -497,9 +605,14 @@ function BulkImport() {
       });
       setImportReport(report);
       toast.success("Import completed successfully!");
-      setPapersList([]);
-      setJobId("");
-      setScanStatus(null);
+      
+      setSelectedPaperIndices(new Set());
+
+      if (!isScanning) {
+        setPapersList([]);
+        setJobId("");
+        setScanStatus(null);
+      }
     } catch (err: any) {
       console.error(err);
       toast.error(err.message || "Failed to execute bulk import.");
@@ -726,24 +839,31 @@ function BulkImport() {
             </div>
           )}
 
-          {papersList.length > 0 && !isScanning && (
+          {selectedPaperIndices.size > 0 && (
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-card border border-border p-5 rounded-2xl shadow-sm">
               <div>
                 <h3 className="text-lg font-bold">Import Authorization Review</h3>
                 <p className="text-xs text-muted-foreground">
-                  Grouped subjects are ready. Review matches and edit values below before finalizing sync.
+                  {isScanning
+                    ? "Importing selected subjects immediately. The scanner will continue processing other files."
+                    : "Grouped subjects are ready. Review matches and edit values below before finalizing sync."}
                 </p>
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={() => setPapersList([])}
+                  onClick={() => {
+                    setSelectedPaperIndices(new Set());
+                    if (!isScanning) {
+                      setPapersList([]);
+                    }
+                  }}
                   className="rounded-xl border border-border bg-background px-4 py-2.5 text-xs font-bold hover:bg-accent"
                 >
-                  Cancel
+                  {isScanning ? "Deselect All" : "Cancel"}
                 </button>
                 <button
                   onClick={handleExecuteImport}
-                  disabled={isImporting || selectedPaperIndices.size === 0}
+                  disabled={isImporting}
                   className="flex items-center gap-1.5 rounded-xl bg-primary px-6 py-2.5 text-xs font-bold text-primary-foreground hover:opacity-95 disabled:opacity-50"
                 >
                   {isImporting ? (
@@ -877,14 +997,12 @@ function BulkImport() {
                   <option value="updated">Updated</option>
                 </select>
 
-                {!isScanning && (
-                  <button
-                    onClick={handleSelectAll}
-                    className="border border-border bg-background hover:bg-accent rounded-lg text-xs px-3.5 py-2 font-bold transition-colors"
-                  >
-                    {selectedPaperIndices.size === displaySubjects.length ? "Deselect All" : "Select All"}
-                  </button>
-                )}
+                <button
+                  onClick={handleSelectAll}
+                  className="border border-border bg-background hover:bg-accent rounded-lg text-xs px-3.5 py-2 font-bold transition-colors"
+                >
+                  {selectedPaperIndices.size > 0 && selectedPaperIndices.size === displaySubjects.filter(s => s.status !== "Scanning" && s.status !== "Searching Answer Key" && s.status !== "Searching Question Paper" && s.status !== "Already Imported" && s.status !== "Duplicate").length ? "Deselect All" : "Select All"}
+                </button>
               </div>
             </div>
 
@@ -895,16 +1013,23 @@ function BulkImport() {
                 </div>
               ) : (
                 filteredSubjects.map((sub, idx) => {
-                  const keyIdx = isScanning ? idx : sub.keyIndex;
+                  const keyIdx = sub.keyIndex;
                   const isSelected = selectedPaperIndices.has(keyIdx);
                   const isExpanded = expandedCard === `${sub.subject}-${keyIdx}`;
+
+                  const isSelectable =
+                    sub.status !== "Scanning" &&
+                    sub.status !== "Searching Answer Key" &&
+                    sub.status !== "Searching Question Paper" &&
+                    sub.status !== "Already Imported" &&
+                    sub.status !== "Duplicate";
 
                   return (
                     <div
                       key={keyIdx}
                       className={`border bg-card rounded-xl shadow-xs transition-all overflow-hidden ${
                         isExpanded ? "border-primary/40 ring-1 ring-primary/10" : "border-border hover:border-slate-300 dark:hover:border-slate-700"
-                      } ${isSelected ? "bg-primary/[0.01]" : ""}`}
+                      } ${isSelected ? "bg-primary/[0.01]" : ""} ${!isSelectable ? "opacity-90" : ""}`}
                     >
                       
                       <div
@@ -913,17 +1038,16 @@ function BulkImport() {
                       >
                         <div className="flex items-center gap-3 min-w-0">
                           
-                          {!isScanning && (
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={(e) => {
-                                e.stopPropagation();
-                                handleSelectRow(keyIdx);
-                              }}
-                              className="rounded accent-primary h-4.5 w-4.5 cursor-pointer shrink-0"
-                            />
-                          )}
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            disabled={!isSelectable}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              handleSelectRow(keyIdx);
+                            }}
+                            className="rounded accent-primary h-4.5 w-4.5 cursor-pointer shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+                          />
 
                           <div className="min-w-0">
                             <span className="font-bold text-sm md:text-base text-foreground truncate block">{sub.subject}</span>
