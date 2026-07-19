@@ -107,6 +107,41 @@ function calculateMatchScore(qp: any, ak: any): number {
   return score;
 }
 
+/**
+ * Level 4 OCR: Lightweight Gemini Vision call to extract raw text from scanned PDFs.
+ * This is MUCH cheaper than a full metadata extraction call — we just ask for the text,
+ * then run our local heuristic pipeline on the OCR'd output.
+ * Only called when pdf-parse returns < 100 chars of text (indicating a scanned/image PDF).
+ */
+async function ocrViaGemini(pdfBase64: string): Promise<string> {
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (!geminiApiKey) return "";
+
+  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
+
+  const prompt = `Extract ALL visible text from this PDF page exactly as it appears. Return ONLY the raw text, no formatting, no JSON, no explanation. Include headers, footers, exam details, subject names, dates, marks — everything visible.`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{
+        role: "user",
+        parts: [
+          { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
+          { text: prompt },
+        ],
+      }],
+    }),
+  });
+
+  if (!response.ok) return "";
+
+  const body = (await response.json()) as any;
+  return body.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+}
+
 async function extractMetadataViaGemini(
   pdfBase64: string,
   filename: string,
@@ -261,12 +296,22 @@ async function processQueue(jobId: string, googleAccessToken: string) {
       return;
     }
 
+    // Get current job progress to check if starting first-time vs resume
+    const { data: job } = await supabaseAdmin
+      .from("bulk_import_jobs")
+      .select("progress, current_step")
+      .eq("id", jobId)
+      .single();
+
+    const initialProgress = (job && job.current_step === "scan_completed") ? 10 : (job?.progress || 10);
+
     // Update job to processing
     await supabaseAdmin
       .from("bulk_import_jobs")
       .update({
         status: "processing",
         current_step: "Extracting metadata from PDFs...",
+        progress: initialProgress,
         updated_at: new Date().toISOString(),
       })
       .eq("id", jobId);
@@ -380,7 +425,7 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           localText = textData.text || "";
 
           // 3. Local extraction
-          localResult = await localExtract(localText, item.name);
+          localResult = await localExtract(localText, item.name, item.path);
         } catch (err: any) {
           console.error(`Error processing file ${item.name}:`, err);
           extractionError = err instanceof Error ? err.message : String(err);
@@ -1051,7 +1096,8 @@ router.get(
       const { data: items } = await supabaseAdmin
         .from("bulk_import_items")
         .select("id, name, path, status, type, error, used_ai")
-        .eq("job_id", jobId);
+        .eq("job_id", jobId)
+        .order("created_at", { ascending: true });
 
       res.json({
         id: job.id,

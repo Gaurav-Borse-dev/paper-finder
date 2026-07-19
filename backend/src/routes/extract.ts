@@ -317,26 +317,447 @@ export function mergeResults(local: ExtractionResult, api: ExtractionResult): Ex
 /**
  * localExtract performs regular expression matches and database checks on extracted plain text
  */
-export async function localExtract(text: string, filename?: string): Promise<ExtractionResult> {
-  const result: ExtractionResult = {
-    subject: { value: null, confidence: 0 },
-    subject_code: { value: null, confidence: 0 },
-    department: { value: null, confidence: 0 },
-    semester: { value: null, confidence: 0 },
-    academic_year: { value: null, confidence: 0 },
-    exam_type: { value: null, confidence: 0 },
-    marks: { value: null, confidence: 0 },
-    exam_date: { value: null, confidence: 0 },
-    exam_month: { value: null, confidence: 0 },
-    exam_year: { value: null, confidence: 0 },
+export const SUBJECTS_ALIASES: Record<string, string> = {
+  // Electrical / Electronics fundamentals
+  "BEEDE": "Basic Electrical Engineering and Digital Electronics",
+  "BEEE": "Basic Electrical & Electronics Engineering",
+  "BEE and DE": "Basic Electrical Engineering and Digital Electronics",
+  "ADE": "Analog and Digital Electronics",
+  "EDC": "Electronic Devices and Circuits",
+  "DE": "Digital Electronics",
+  "DIGITAL ELECT": "Digital Electronics",
+  "ECT": "Electrical Circuit Theory",
+
+  // Communication skills
+  "ECS": "Effective Communication Skills",
+
+  // Engineering Mechanics
+  "CEM": "Computational Engineering Mechanics",
+
+  // Mathematics variants
+  "EM-I": "Engineering Mathematics I",
+  "EM I": "Engineering Mathematics I",
+  "MATH-I": "Engineering Mathematics I",
+  "ENGG. MATH-I": "Engineering Mathematics I",
+  "ENGG. MATH": "Engineering Mathematics",
+  "M-III": "Engineering Mathematics III",
+  "EM-II": "Engineering Mathematics II",
+  "EM II": "Engineering Mathematics II",
+  "MATH-II": "Engineering Mathematics II",
+  "EM-III": "Engineering Mathematics III",
+  "EM III": "Engineering Mathematics III",
+  "MATH-III": "Engineering Mathematics III",
+  "Engg. Math III": "Engineering Mathematics III",
+  "EM-IV": "Engineering Mathematics IV",
+  "EM IV": "Engineering Mathematics IV",
+  "MATH-IV": "Engineering Mathematics IV",
+  "Engg. Math-iv": "Engineering Mathematics IV",
+  "COMP.MATH": "Computational Mathematics",
+
+  // Data Structures / Algorithms
+  "DSA": "Data Structures and Algorithms",
+  "DS & A": "Data Structures and Algorithms",
+  "DATA STRUCTURE": "Data Structures",
+  "DAA": "Design and Analysis of Algorithms",
+  "DISCRETE STRUCTURE": "Discrete Structures",
+  "DISCRETE STRUCT.": "Discrete Structures",
+  "DISCTERE STRUCTURE": "Discrete Structures",
+
+  // Database
+  "DBMS": "Database Management Systems",
+  "ADBMS": "Advanced Database Management Systems",
+  "DATABASE SYSTEM": "Database Systems",
+
+  // AI / ML / DS
+  "AI": "Artificial Intelligence",
+  "ML": "Machine Learning",
+  "ML-I": "Machine Learning I",
+  "ML-II": "Machine Learning II",
+  "OS": "Operating Systems",
+  "CN": "Computer Networks",
+  "IOT": "Internet of Things",
+  "INFO SECURITY": "Information Security",
+  "IS": "Information Security",
+  "DMW": "Data Mining and Warehousing",
+  "DISTRI. COMPUTING": "Distributed Computing",
+
+  // Signal Processing / Communication
+  "DSP": "Digital Signal Processing",
+  "DSPA": "Digital Signal Processing and Applications",
+  "DC": "Digital Communication",
+  "AC": "Analog Communication",
+  "S&S": "Signals and Systems",
+  "FDIP": "Fundamentals of Digital Image Processing",
+  "MOBILE COMM SYSTEM": "Mobile Communication Systems",
+  "MICROWAVE ENGG": "Microwave Engineering",
+  "RADIATING SYSTEM": "Radiating Systems",
+
+  // Civil
+  "BPD": "Building Planning and Drawing",
+  "SA": "Structural Analysis",
+  "DSS": "Design of Steel Structures",
+  "WRE": "Water Resources Engineering",
+  "GEOTECH": "Geotechnical Engineering",
+  "SUR": "Surveying",
+  "SUR-I": "Surveying I",
+  "MOS": "Mechanics of Solids",
+  "E&C": "Estimation and Costing",
+  "MFCE": "Mechanics of Fluids and Civil Engineering",
+  "Constr. Mngt": "Construction Management",
+  "SFE": "Structural and Foundation Engineering",
+
+  // Mechanical
+  "FM": "Fluid Mechanics",
+  "KOM": "Kinematics of Machinery",
+  "AMP": "Automotive Prime Movers",
+  "APM": "Automotive Prime Movers",
+  "MMM": "Mechanical Measurements and Metrology",
+  "M&M": "Mechanical Measurements and Metrology",
+  "MT": "Manufacturing Technology",
+  "MP": "Manufacturing Processes",
+  "SOM": "Strength of Materials",
+  "HT": "Heat Transfer",
+  "MV": "Mechanical Vibrations",
+  "MD-II": "Machine Design II",
+  "FMS PAS": "Flexible Manufacturing Systems",
+  "FINITE": "Finite Element Analysis",
+  "AUTO ENGG": "Automobile Engineering",
+  "AUTOMOBILE": "Automobile Engineering",
+
+  // Electrical
+  "IIAEE": "Introduction to Industrial Automation and Electrical Engineering",
+  "ETU": "Electrical Technology and Utilization",
+  "PSA": "Power System Analysis",
+  "EME": "Elements of Mechanical Engineering",
+  "MIA": "Microcontrollers and Applications",
+  "MICRO & ITS APPL": "Microcontrollers and Applications",
+  "PSTD": "Power System Transmission and Distribution",
+  "EEGS": "Electrical Energy Generation System",
+  "EMAI": "Electrical Machines and Instruments",
+  "ENAS": "Electrical Network Analysis and Synthesis",
+  "IEC": "Industrial Electronics and Control",
+  "RES": "Renewable Energy Systems",
+  "HVE": "High Voltage Engineering",
+  "SWITCHGEAR & PROT": "Switchgear and Protection",
+  "ELECTRICAL MOBILITY": "Electrical Mobility",
+  "IAC": "Instrumentation and Control",
+  "POWER ENGG.": "Power Engineering",
+  "TMEE": "Testing and Maintenance of Electrical Equipment",
+  "ELECT. MACHINE DESIGN": "Electrical Machine Design",
+  "EPSD": "Electrical Power System Design",
+  "EMBEDDED SYSTEM": "Embedded Systems",
+  "EMBEDDE SYSTEM": "Embedded Systems",
+  "EM-I ELECTRICAL": "Engineering Mathematics I",
+
+  // Computer Engineering
+  "SF": "System Fundamentals",
+  "COMP SYSTEM FUND.": "Computer System Fundamentals",
+  "SYSTEM FUND.": "System Fundamentals",
+  "PLP": "Principles of Programming Languages",
+  "MIS": "Management Information System",
+  "POA": "Processor Organization and Architecture",
+  "FLAT": "Formal Language and Automata Theory",
+  "AOA": "Analysis of Algorithms",
+  "CNS": "Cryptography and Network Security",
+  "C N S": "Cryptography and Network Security",
+  "DSD": "Digital System Design",
+  "ECD": "Electronic Circuit Design",
+
+  // Graphics / Physics / Chemistry
+  "EG": "Engineering Graphics",
+  "GP": "Graphics",
+  "GRAPHICS": "Engineering Graphics",
+  "ENGG CHEMISTRY": "Engineering Chemistry",
+  "ENGG. CHEM": "Engineering Chemistry",
+  "ENGG. PHYSICS": "Engineering Physics",
+  "Engg. Physics": "Engineering Physics",
+  "Engg. Chemistry": "Engineering Chemistry",
+  "PHYSICS": "Engineering Physics",
+  "CHEMISTRY": "Engineering Chemistry",
+  "Mechanics": "Engineering Mechanics",
+  "Comp Engg. Mechanics": "Computational Engineering Mechanics",
+
+  // Misc
+  "RM": "Research Methodology",
+  "UHV": "Universal Human Values",
+  "PLCM": "Product Lifecycle Management",
+  "IPR": "Intellectual Property Rights",
+  "PFM": "Personal Financial Management",
+  "BCM": "Business Communication and Management",
+  "CT": "Communication Techniques",
+  "CTAK": "Communication Techniques",
+  "SPC": "Structured Programming using C",
+  "RFC": "Reinforced Concrete Construction",
+  "E&WP": "Environmental and Water Pollution",
+  "IC": "Internal Combustion Engines",
+  "CS": "Computer Science",
+  "AIML": "Artificial Intelligence and Machine Learning",
+  "IPCV-I": "Image Processing and Computer Vision - I",
+  "IPCV-II": "Image Processing and Computer Vision - II",
+  "QBM": "Quantitative Business Methods",
+  "PROB & STAT": "Probability and Statistics",
+  "Software Engg.": "Software Engineering"
+};
+
+const DEPT_ABBRS: Record<string, string[]> = {
+  "Computer Engineering": ["cse", "computer engineering", "comp eng", "comp. eng.", "comp"],
+  "Information Technology": ["it", "information technology", "infotech"],
+  "Mechanical Engineering": ["mech", "mechanical", "mechanical engineering", "mech eng", "mech. eng."],
+  "Civil Engineering": ["civil", "civil engineering"],
+  "Electrical Engineering": ["electrical", "electrical engineering", "elect"],
+  "Electronics and Telecommunication": ["entc", "e&tc", "etc", "et&c", "electronics", "telecommunication"],
+  "Artificial Intelligence and Machine Learning": ["aiml", "ai & ml", "ai/ml", "artificial intelligence"],
+  "Data Science": ["aids", "data science", "cseds", "ds"],
+};
+
+function lookupSubjectAlias(str: string): string | null {
+  const normalized = str.toUpperCase();
+  for (const [abbr, fullName] of Object.entries(SUBJECTS_ALIASES)) {
+    const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
+    if (regex.test(normalized)) {
+      return fullName;
+    }
+  }
+  return null;
+}
+
+function matchDepartment(str: string): string | null {
+  const lower = str.toLowerCase();
+  for (const [deptName, abbreviations] of Object.entries(DEPT_ABBRS)) {
+    if (lower.includes(deptName.toLowerCase())) {
+      return deptName;
+    }
+    for (const abbr of abbreviations) {
+      const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
+      if (regex.test(lower)) {
+        return deptName;
+      }
+    }
+  }
+  return null;
+}
+
+function matchSemester(str: string): number | null {
+  const semNumRegex = /\b(?:semester|sem)\s*[:\-]?\s*([1-8])\b/i;
+  const semRomanRegex = /\b(?:semester|sem)\s*[:\-]?\s*(I|II|III|IV|V|VI|VII|VIII)\b/i;
+  const romanMap: Record<string, number> = {
+    I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8
   };
+
+  const numMatch = str.match(semNumRegex);
+  if (numMatch) {
+    return parseInt(numMatch[1], 10);
+  }
+  const romanMatch = str.match(semRomanRegex);
+  if (romanMatch) {
+    return romanMap[romanMatch[1].toUpperCase()] || null;
+  }
+  return null;
+}
+
+function matchAcademicYear(str: string): string | null {
+  const yearRegex = /\b(20\d{2})\s*-\s*(20)?(\d{2})\b/;
+  const match = str.match(yearRegex);
+  if (match) {
+    return `${match[1]}-${match[3]}`;
+  }
+  return null;
+}
+
+function matchExamType(str: string): "ESE" | "RE-ESE" | "Supplementary" | "Complementary" | null {
+  // Check for RE-ESE first (more specific) before ESE
+  if (/\b(?:re\s*-\s*ese|re\s*ese|re\s*-\s*exam|re\s*exam|RE\s*-\s*ODD|RE\s*ODD|RE\s*-\s*EVEN|RE\s*EVEN)\b/i.test(str)) {
+    return "RE-ESE";
+  }
+  if (/\b(?:ese|end\s*semester|regular\s*end\s*semester|regular\s*ese)\b/i.test(str)) {
+    return "ESE";
+  }
+  if (/\b(?:supplementary|supp)\b/i.test(str)) {
+    return "Supplementary";
+  }
+  if (/\b(?:complementary)\b/i.test(str)) {
+    return "Complementary";
+  }
+  // Infer ESE from QP/AK/synoptics markers (these are regular exam papers)
+  if (/\b(?:qp|question\s*paper|synoptics)\b/i.test(str) || /\b(?:ak|answer\s*key|solution|soln)\b/i.test(str)) {
+    return "ESE";
+  }
+  return null;
+}
+
+function matchMarks(str: string): number | null {
+  const marksRegex = /\b(?:max\w*\s+marks|maximum\s+marks|marks)\s*[:\-]?\s*(\d{2,3})\b/i;
+  const match = str.match(marksRegex);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
+  const genericMatch = str.match(/\b(50|60|65|70|75|80|100)\b/);
+  if (genericMatch) {
+    return parseInt(genericMatch[1], 10);
+  }
+  return null;
+}
+
+function matchSubjectCode(str: string): string | null {
+  const codeRegexExplicit = /(?:subject|course)\s+code\s*[:\-]?\s*\b([A-Z0-9\-]+)\b/i;
+  const genericCodeRegex = /\b([A-Z]{2,4}\s*\d{3,4}[A-Z]?)\b/;
+
+  const explicitMatch = str.match(codeRegexExplicit);
+  if (explicitMatch) {
+    return explicitMatch[1].toUpperCase();
+  }
+  const genericMatch = str.match(genericCodeRegex);
+  if (genericMatch) {
+    return genericMatch[1].replace(/\s+/g, "").toUpperCase();
+  }
+  return null;
+}
+
+export function parseFromFilename(filename: string): ExtractionResult {
+  const result: ExtractionResult = JSON.parse(JSON.stringify(EMPTY_RESULT));
+  if (!filename) return result;
+
+  const fnClean = filename.replace(/\.pdf$/i, "").replace(/[\_\-]+/g, " ").trim();
+
+  // Try alias lookup first (abbreviations like BEEDE, DSA, EM-III)
+  const alias = lookupSubjectAlias(fnClean);
+  if (alias) {
+    result.subject = { value: alias, confidence: 0.95 };
+  }
+
+  // If no alias matched, try extracting a full subject name from the filename
+  // Patterns: "QP 75 AIML SEM 3 Engineering Mathematics III"
+  //           "ENGG CHEMISTRY QP"
+  //           "Machine Learning comp QP"
+  //           "AK SY MECH SEM III Manufacturing Processes 12.01.2024"
+  if (!result.subject.value) {
+    let subjectCandidate = fnClean
+      .replace(/\b(?:QP|AK|RCPIT|synoptics|SYNOPTICS|FY|SY|TY|BE|BTECH|FYBTECH|SYBTECH|TYBTECH)\b/gi, "")
+      .replace(/\b(?:SEM|SEMESTER)\s*[:\-]?\s*(?:[IVX]+|\d)\b/gi, "")
+      .replace(/\b(?:COMP|MECH|CIVIL|ETC|ELECT|AIML|AIDS|CSEDS|DS|IT|MCA|FYALL|FY ALL|SY ALL|ALL|GL)\b/gi, "")
+      .replace(/\b\d{2}[\.\/]\d{2}[\.\/]\d{4}\b/g, "") // dates like 12.01.2024
+      .replace(/\b\d{8,}\b/g, "") // long number sequences
+      .replace(/\b(20\d{2})\s*-?\s*(\d{2})\b/g, "") // academic year
+      .replace(/\b(50|60|65|70|75|80|100)\s*[Mm]?\b/g, "") // marks
+      .replace(/\b(?:GR|Group)\s*[A-Z]\b/gi, "") // group markers
+      .replace(/\b(?:ODD|EVEN|RE)\b/gi, "")
+      .replace(/\b[A-Z]{2,4}\d{3,}[A-Z]?\b/g, "") // course codes like RCP23VCPC301
+      .replace(/\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+20\d{2}\b/gi, "") // "29 Jan 2025"
+      .replace(/\b(?:compressed|_compressed|solution|Solution)\b/gi, "")
+      .replace(/^\d+\.\s*/, "") // leading numbering "1." "7."
+      .replace(/\s*@+\s*/g, "") // trailing @
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // Clean up and title-case if the candidate looks like a real subject name
+    if (subjectCandidate.length >= 3 && subjectCandidate.length <= 80) {
+      // Check if this matches a known subject from the alias table values
+      const lowerCandidate = subjectCandidate.toLowerCase();
+      let foundAlias = false;
+      for (const fullName of Object.values(SUBJECTS_ALIASES)) {
+        if (fullName.toLowerCase() === lowerCandidate || lowerCandidate.includes(fullName.toLowerCase())) {
+          result.subject = { value: fullName, confidence: 0.95 };
+          foundAlias = true;
+          break;
+        }
+      }
+      if (!foundAlias && subjectCandidate.length >= 5) {
+        // Title-case it
+        const titleCased = subjectCandidate
+          .split(" ")
+          .filter(w => w.length > 0)
+          .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+          .join(" ");
+        if (titleCased.length >= 5) {
+          result.subject = { value: titleCased, confidence: 0.80 };
+        }
+      }
+    }
+  }
+
+  const matchedDept = matchDepartment(fnClean);
+  if (matchedDept) {
+    result.department = { value: matchedDept, confidence: 0.95 };
+  }
+
+  const matchedSem = matchSemester(fnClean);
+  if (matchedSem) {
+    result.semester = { value: matchedSem, confidence: 0.95 };
+  }
+
+  const matchedYear = matchAcademicYear(fnClean);
+  if (matchedYear) {
+    result.academic_year = { value: matchedYear, confidence: 0.95 };
+  }
+
+  const matchedExamType = matchExamType(fnClean);
+  if (matchedExamType) {
+    result.exam_type = { value: matchedExamType, confidence: 0.95 };
+  }
+
+  const matchedMarks = matchMarks(fnClean);
+  if (matchedMarks) {
+    result.marks = { value: matchedMarks, confidence: 0.95 };
+  }
+
+  const matchedCode = matchSubjectCode(fnClean);
+  if (matchedCode) {
+    result.subject_code = { value: matchedCode, confidence: 0.95 };
+  }
+
+  return result;
+}
+
+export function parseFromFolderPath(folderPath: string): ExtractionResult {
+  const result: ExtractionResult = JSON.parse(JSON.stringify(EMPTY_RESULT));
+  if (!folderPath) return result;
+
+  const parts = folderPath.split("/").map(p => p.trim());
+  for (const part of parts) {
+    const matchedDept = matchDepartment(part);
+    if (matchedDept && !result.department.value) {
+      result.department = { value: matchedDept, confidence: 0.90 };
+    }
+
+    const matchedSem = matchSemester(part);
+    if (matchedSem && !result.semester.value) {
+      result.semester = { value: matchedSem, confidence: 0.90 };
+    }
+
+    const matchedYear = matchAcademicYear(part);
+    if (matchedYear && !result.academic_year.value) {
+      result.academic_year = { value: matchedYear, confidence: 0.90 };
+    }
+
+    const alias = lookupSubjectAlias(part);
+    if (alias && !result.subject.value) {
+      result.subject = { value: alias, confidence: 0.90 };
+    }
+  }
+
+  return result;
+}
+
+/**
+ * localExtract performs regular expression matches and database checks on extracted plain text, filenames, and folder paths
+ */
+export async function localExtract(text: string, filename?: string, folderPath?: string): Promise<ExtractionResult> {
+  const result: ExtractionResult = JSON.parse(JSON.stringify(EMPTY_RESULT));
 
   const textToScan = text || "";
   const fnToScan = filename || "";
   const normalizedText = textToScan.replace(/\s+/g, " ");
-  const normalizedFn = fnToScan.replace(/[\_\-]+/g, " ");
 
-  // 1. Department matching
+  // Level 1: Filename parsing (confidence 0.95)
+  const fnResult = parseFromFilename(fnToScan);
+
+  // Level 2: Folder path parsing (confidence 0.90)
+  const pathResult = parseFromFolderPath(folderPath || "");
+
+  // Level 3: PDF text parsing (confidence 0.98)
+  const textResult: ExtractionResult = JSON.parse(JSON.stringify(EMPTY_RESULT));
+
+  // -- Department --
   try {
     const { data: depts } = await supabase.from("departments").select("name");
     if (depts && depts.length > 0) {
@@ -345,31 +766,20 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
         const dName = d.name.toLowerCase().trim();
         if (textToScan.toLowerCase().includes(dName)) {
           matchedDept = d.name;
-          result.department = { value: d.name, confidence: 0.95 };
+          textResult.department = { value: d.name, confidence: 0.98 };
           break;
         }
       }
 
-      const deptAbbrs: Record<string, string[]> = {
-        "Computer Engineering": ["cse", "computer engineering", "comp eng", "comp. eng."],
-        "Information Technology": ["it", "information technology", "infotech"],
-        "Mechanical Engineering": ["mech", "mechanical", "mechanical engineering", "mech eng", "mech. eng."],
-        "Civil Engineering": ["civil", "civil engineering"],
-        "Electrical Engineering": ["electrical", "electrical engineering"],
-        "Electronics and Telecommunication": ["entc", "e&tc", "etc", "et&c", "electronics", "telecommunication"],
-        "Artificial Intelligence and Machine Learning": ["aiml", "ai & ml", "ai/ml", "artificial intelligence"],
-        "Data Science": ["aids", "data science"],
-      };
-
       if (!matchedDept) {
         for (const d of depts) {
-          const abbrs = deptAbbrs[d.name];
+          const abbrs = DEPT_ABBRS[d.name];
           if (abbrs) {
             for (const abbr of abbrs) {
               const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
               if (regex.test(textToScan)) {
                 matchedDept = d.name;
-                result.department = { value: d.name, confidence: 0.85 };
+                textResult.department = { value: d.name, confidence: 0.98 };
                 break;
               }
             }
@@ -377,109 +787,34 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
           if (matchedDept) break;
         }
       }
-
-      if (!matchedDept && fnToScan) {
-        for (const d of depts) {
-          const dName = d.name.toLowerCase().trim();
-          if (fnToScan.toLowerCase().includes(dName)) {
-            matchedDept = d.name;
-            result.department = { value: d.name, confidence: 0.90 };
-            break;
-          }
-        }
-        if (!matchedDept) {
-          for (const d of depts) {
-            const abbrs = deptAbbrs[d.name];
-            if (abbrs) {
-              for (const abbr of abbrs) {
-                const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
-                if (regex.test(normalizedFn)) {
-                  matchedDept = d.name;
-                  result.department = { value: d.name, confidence: 0.85 };
-                  break;
-                }
-              }
-            }
-            if (matchedDept) break;
-          }
-        }
-      }
     }
   } catch (e) {
     console.error("Local dept query failed:", e);
   }
 
-  // 2. Semester matching
-  const semNumRegex = /\b(?:semester|sem)\s*[:\-]?\s*([1-8])\b/i;
-  const semRomanRegex = /\b(?:semester|sem)\s*[:\-]?\s*([I|II|III|IV|V|VI|VII|VIII]+)\b/i;
+  // -- Semester --
+  const semNumMatch = normalizedText.match(/\b(?:semester|sem)\s*[:\-]?\s*([1-8])\b/i);
+  const semRomanMatch = normalizedText.match(/\b(?:semester|sem)\s*[:\-]?\s*(I|II|III|IV|V|VI|VII|VIII)\b/i);
   const romanMap: Record<string, number> = {
     I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8
   };
 
-  let semVal = null;
-  let semConf = 0;
-
-  const semNumMatch = normalizedText.match(semNumRegex);
   if (semNumMatch) {
-    semVal = parseInt(semNumMatch[1], 10);
-    semConf = 0.90;
-  } else {
-    const semRomanMatch = normalizedText.match(semRomanRegex);
-    if (semRomanMatch) {
-      const romanVal = semRomanMatch[1].toUpperCase();
-      if (romanMap[romanVal]) {
-        semVal = romanMap[romanVal];
-        semConf = 0.90;
-      }
+    textResult.semester = { value: parseInt(semNumMatch[1], 10), confidence: 0.98 };
+  } else if (semRomanMatch) {
+    const romanVal = semRomanMatch[1].toUpperCase();
+    if (romanMap[romanVal]) {
+      textResult.semester = { value: romanMap[romanVal], confidence: 0.98 };
     }
   }
 
-  if (!semVal && fnToScan) {
-    const semNumMatchFn = normalizedFn.match(semNumRegex);
-    if (semNumMatchFn) {
-      semVal = parseInt(semNumMatchFn[1], 10);
-      semConf = 0.85;
-    } else {
-      const semRomanMatchFn = normalizedFn.match(semRomanRegex);
-      if (semRomanMatchFn) {
-        const romanVal = semRomanMatchFn[1].toUpperCase();
-        if (romanMap[romanVal]) {
-          semVal = romanMap[romanVal];
-          semConf = 0.85;
-        }
-      }
-    }
-  }
-
-  if (semVal) {
-    result.semester = { value: semVal, confidence: semConf };
-  }
-
-  // 3. Academic Year matching
-  const yearRegex = /\b(20\d{2})\s*-\s*(20)?(\d{2})\b/;
-  let startYear = "";
-  let endYear = "";
-  let yearConf = 0;
-
-  const yearMatch = normalizedText.match(yearRegex);
+  // -- Academic Year --
+  const yearMatch = normalizedText.match(/\b(20\d{2})\s*-\s*(20)?(\d{2})\b/);
   if (yearMatch) {
-    startYear = yearMatch[1];
-    endYear = yearMatch[3];
-    yearConf = 0.90;
-  } else if (fnToScan) {
-    const yearMatchFn = normalizedFn.match(yearRegex);
-    if (yearMatchFn) {
-      startYear = yearMatchFn[1];
-      endYear = yearMatchFn[3];
-      yearConf = 0.85;
-    }
+    textResult.academic_year = { value: `${yearMatch[1]}-${yearMatch[3]}`, confidence: 0.98 };
   }
 
-  if (startYear && endYear) {
-    result.academic_year = { value: `${startYear}-${endYear}`, confidence: yearConf };
-  }
-
-  // 4. Exam Type matching
+  // -- Exam Type --
   const examTypePatterns = [
     { type: "RE-ESE" as const, regex: /\b(?:re\s*-\s*ese|re\s*ese|re\s*-\s*exam|re\s*exam|\\bre\\b)\b/i },
     { type: "ESE" as const, regex: /\b(?:ese|end\s*semester|regular\s*end\s*semester|regular\s*ese)\b/i },
@@ -487,53 +822,34 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
     { type: "Complementary" as const, regex: /\b(?:complementary|comp)\b/i }
   ];
 
-  let matchedExamType = null;
-  let examTypeConf = 0;
-
   for (const et of examTypePatterns) {
     if (et.regex.test(normalizedText)) {
-      matchedExamType = et.type;
-      examTypeConf = 0.90;
+      textResult.exam_type = { value: et.type, confidence: 0.98 };
       break;
     }
   }
 
-  if (!matchedExamType && fnToScan) {
-    for (const et of examTypePatterns) {
-      if (et.regex.test(normalizedFn)) {
-        matchedExamType = et.type;
-        examTypeConf = 0.85;
-        break;
-      }
-    }
-  }
-
-  if (matchedExamType) {
-    result.exam_type = { value: matchedExamType, confidence: examTypeConf };
-  }
-
-  // 5. Marks matching (e.g. Max Marks : 75)
-  const marksRegex = /\b(?:max\w*\s+marks|maximum\s+marks|marks)\s*[:\-]?\s*(\d{2,3})\b/i;
-  let marksVal = null;
-  let marksConf = 0;
-
-  const marksMatch = normalizedText.match(marksRegex);
+  // -- Marks --
+  const marksMatch = normalizedText.match(/\b(?:max\w*\s+marks|maximum\s+marks|marks)\s*[:\-]?\s*(\d{2,3})\b/i);
   if (marksMatch) {
-    marksVal = parseInt(marksMatch[1], 10);
-    marksConf = 0.90;
-  } else if (fnToScan) {
-    const fnMarksMatch = normalizedFn.match(/\b(50|60|70|75|80|100)\b/);
-    if (fnMarksMatch) {
-      marksVal = parseInt(fnMarksMatch[1], 10);
-      marksConf = 0.80;
+    textResult.marks = { value: parseInt(marksMatch[1], 10), confidence: 0.98 };
+  }
+
+  // -- Subject Code --
+  const codeRegexExplicit = /(?:subject|course)\s+code\s*[:\-]?\s*\b([A-Z0-9\-]+)\b/i;
+  const genericCodeRegex = /\b([A-Z]{2,4}\s*\d{3,4}[A-Z]?)\b/;
+
+  const explicitMatch = normalizedText.match(codeRegexExplicit);
+  if (explicitMatch) {
+    textResult.subject_code = { value: explicitMatch[1].toUpperCase(), confidence: 0.98 };
+  } else {
+    const genericMatch = normalizedText.match(genericCodeRegex);
+    if (genericMatch) {
+      textResult.subject_code = { value: genericMatch[1].replace(/\s+/g, "").toUpperCase(), confidence: 0.98 };
     }
   }
 
-  if (marksVal) {
-    result.marks = { value: marksVal, confidence: marksConf };
-  }
-
-  // 6. Exam Date / Month / Year matching
+  // -- Date, Month, Year --
   const monthMap: Record<string, string> = {
     january: "01", february: "02", march: "03", april: "04", may: "05", june: "06",
     july: "07", august: "08", september: "09", october: "10", november: "11", december: "12",
@@ -547,7 +863,6 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
   let matchedDateStr = "";
   let matchedMonth = "";
   let matchedYearVal: number | null = null;
-  let dateConf = 0;
 
   const matchA = normalizedText.match(dateRegexA);
   if (matchA) {
@@ -558,7 +873,6 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
     matchedYearVal = parseInt(year, 10);
     const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     matchedMonth = months[parseInt(month, 10) - 1];
-    dateConf = 0.90;
   } else {
     const matchB = normalizedText.match(dateRegexB);
     if (matchB) {
@@ -570,7 +884,6 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
         matchedDateStr = `${year}-${monthCode}-${day}`;
         matchedYearVal = parseInt(year, 10);
         matchedMonth = matchB[2].charAt(0).toUpperCase() + matchB[2].slice(1);
-        dateConf = 0.90;
       }
     } else {
       const matchC = normalizedText.match(dateRegexC);
@@ -583,47 +896,18 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
           matchedDateStr = `${year}-${monthCode}-${day}`;
           matchedYearVal = parseInt(year, 10);
           matchedMonth = matchC[1].charAt(0).toUpperCase() + matchC[1].slice(1);
-          dateConf = 0.90;
-        }
-      }
-    }
-  }
-
-  if (!matchedDateStr && fnToScan) {
-    const matchFnA = normalizedFn.match(dateRegexA);
-    if (matchFnA) {
-      const day = matchFnA[1].padStart(2, "0");
-      const month = matchFnA[2].padStart(2, "0");
-      const year = matchFnA[3];
-      matchedDateStr = `${year}-${month}-${day}`;
-      matchedYearVal = parseInt(year, 10);
-      const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-      matchedMonth = months[parseInt(month, 10) - 1];
-      dateConf = 0.85;
-    } else {
-      const matchFnB = normalizedFn.match(dateRegexB);
-      if (matchFnB) {
-        const day = matchFnB[1].padStart(2, "0");
-        const monthName = matchFnB[2].toLowerCase();
-        const year = matchFnB[3];
-        const monthCode = monthMap[monthName];
-        if (monthCode) {
-          matchedDateStr = `${year}-${monthCode}-${day}`;
-          matchedYearVal = parseInt(year, 10);
-          matchedMonth = matchFnB[2].charAt(0).toUpperCase() + matchFnB[2].slice(1);
-          dateConf = 0.85;
         }
       }
     }
   }
 
   if (matchedDateStr) {
-    result.exam_date = { value: matchedDateStr, confidence: dateConf };
+    textResult.exam_date = { value: matchedDateStr, confidence: 0.98 };
     if (matchedMonth) {
-      result.exam_month = { value: matchedMonth, confidence: dateConf };
+      textResult.exam_month = { value: matchedMonth, confidence: 0.98 };
     }
     if (matchedYearVal) {
-      result.exam_year = { value: matchedYearVal, confidence: dateConf };
+      textResult.exam_year = { value: matchedYearVal, confidence: 0.98 };
     }
   } else {
     const monthYearRegex = /\b([A-Za-z]+)\s+(20\d{2})\b/;
@@ -633,60 +917,13 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
       const monthCode = monthMap[monthName];
       if (monthCode) {
         const fullMonth = myMatch[1].charAt(0).toUpperCase() + myMatch[1].slice(1);
-        result.exam_month = { value: fullMonth, confidence: 0.85 };
-        result.exam_year = { value: parseInt(myMatch[2], 10), confidence: 0.85 };
-      }
-    } else if (fnToScan) {
-      const myMatchFn = normalizedFn.match(monthYearRegex);
-      if (myMatchFn) {
-        const monthName = myMatchFn[1].toLowerCase();
-        const monthCode = monthMap[monthName];
-        if (monthCode) {
-          const fullMonth = myMatchFn[1].charAt(0).toUpperCase() + myMatchFn[1].slice(1);
-          result.exam_month = { value: fullMonth, confidence: 0.80 };
-          result.exam_year = { value: parseInt(myMatchFn[2], 10), confidence: 0.80 };
-        }
+        textResult.exam_month = { value: fullMonth, confidence: 0.98 };
+        textResult.exam_year = { value: parseInt(myMatch[2], 10), confidence: 0.98 };
       }
     }
   }
 
-  // 7. Subject Code matching
-  const codeRegexExplicit = /(?:subject|course)\s+code\s*[:\-]?\s*\b([A-Z0-9\-]+)\b/i;
-  const genericCodeRegex = /\b([A-Z]{2,4}\s*\d{3,4}[A-Z]?)\b/;
-  let codeVal = null;
-  let codeConf = 0;
-
-  const explicitMatch = normalizedText.match(codeRegexExplicit);
-  if (explicitMatch) {
-    codeVal = explicitMatch[1].toUpperCase();
-    codeConf = 0.90;
-  } else {
-    const genericMatch = normalizedText.match(genericCodeRegex);
-    if (genericMatch) {
-      codeVal = genericMatch[1].replace(/\s+/g, "").toUpperCase();
-      codeConf = 0.80;
-    }
-  }
-
-  if (!codeVal && fnToScan) {
-    const explicitMatchFn = normalizedFn.match(codeRegexExplicit);
-    if (explicitMatchFn) {
-      codeVal = explicitMatchFn[1].toUpperCase();
-      codeConf = 0.85;
-    } else {
-      const genericMatchFn = normalizedFn.match(genericCodeRegex);
-      if (genericMatchFn) {
-        codeVal = genericMatchFn[1].replace(/\s+/g, "").toUpperCase();
-        codeConf = 0.80;
-      }
-    }
-  }
-
-  if (codeVal) {
-    result.subject_code = { value: codeVal, confidence: codeConf };
-  }
-
-  // 8. Subject Name matching
+  // -- Subject Name --
   try {
     const { data: subjects } = await supabase.from("subjects").select("name");
     if (subjects && subjects.length > 0) {
@@ -695,18 +932,21 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
         const sName = s.name.toLowerCase().trim();
         if (textToScan.toLowerCase().includes(sName)) {
           matchedSubject = s.name;
-          result.subject = { value: s.name, confidence: 0.95 };
+          textResult.subject = { value: s.name, confidence: 0.98 };
           break;
         }
       }
 
-      if (!matchedSubject && fnToScan) {
-        for (const s of subjects) {
-          const sName = s.name.toLowerCase().trim();
-          if (fnToScan.toLowerCase().includes(sName)) {
-            matchedSubject = s.name;
-            result.subject = { value: s.name, confidence: 0.90 };
-            break;
+      if (!matchedSubject) {
+        const alias = lookupSubjectAlias(textToScan);
+        if (alias) {
+          const dbMatch = subjects.find(s => s.name.toLowerCase() === alias.toLowerCase());
+          if (dbMatch) {
+            matchedSubject = dbMatch.name;
+            textResult.subject = { value: dbMatch.name, confidence: 0.98 };
+          } else {
+            matchedSubject = alias;
+            textResult.subject = { value: alias, confidence: 0.90 };
           }
         }
       }
@@ -721,37 +961,41 @@ export async function localExtract(text: string, filename?: string): Promise<Ext
             .split(" ")
             .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
             .join(" ");
-          matchedSubject = cleanedSub;
-          result.subject = { value: cleanedSub, confidence: 0.75 };
-        }
-      }
-
-      if (!matchedSubject && fnToScan) {
-        let cleanName = normalizedFn
-          .replace(/\.pdf$/i, "")
-          .replace(genericCodeRegex, "")
-          .replace(semNumRegex, "")
-          .replace(semRomanRegex, "")
-          .replace(yearRegex, "")
-          .replace(/\b(?:re\s*-\s*ese|re\s*ese|ese|supp|comp|supplementary|complementary|subqp|qp)\b/ig, "")
-          .replace(/\b(?:etc|cse|it|mech|civil|electrical|aiml|aids)\b/ig, "")
-          .replace(/\b(?:odd|even|sem|semester|sybtech|fybtech|tybtech|btech)\b/ig, "")
-          .replace(/\b\d{1,2}\s+[A-Za-z]+\s+20\d{2}\b/ig, "")
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (cleanName.length >= 3 && cleanName.length <= 50) {
-          const titleCaseName = cleanName
-            .split(" ")
-            .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-            .join(" ");
-          result.subject = { value: titleCaseName, confidence: 0.70 };
+          textResult.subject = { value: cleanedSub, confidence: 0.85 };
         }
       }
     }
   } catch (e) {
     console.error("Local subject query failed:", e);
   }
+
+  // Merge results based on highest confidence
+  const fields: Array<keyof ExtractionResult> = [
+    "subject",
+    "subject_code",
+    "department",
+    "semester",
+    "academic_year",
+    "exam_type",
+    "marks",
+    "exam_date",
+    "exam_month",
+    "exam_year"
+  ];
+
+  fields.forEach((k) => {
+    let best: any = { value: null, confidence: 0 };
+    if (textResult[k] && textResult[k].confidence > best.confidence) {
+      best = textResult[k];
+    }
+    if (fnResult[k] && fnResult[k].confidence > best.confidence) {
+      best = fnResult[k];
+    }
+    if (pathResult[k] && pathResult[k].confidence > best.confidence) {
+      best = pathResult[k];
+    }
+    result[k] = best as any;
+  });
 
   return result;
 }

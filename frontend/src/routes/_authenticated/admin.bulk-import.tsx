@@ -559,22 +559,22 @@ function BulkImport() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-3 gap-4 text-xs font-semibold text-center uppercase tracking-wider">
-                  <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
-                    <span className="text-muted-foreground block text-[10px]">Question Papers</span>
-                    <span className="text-xl font-extrabold block text-primary mt-1">
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div className="bg-slate-50 dark:bg-muted/20 rounded-2xl p-4 border border-border">
+                    <span className="text-muted-foreground block text-[10px] font-bold uppercase tracking-wider">QUESTION PAPERS</span>
+                    <span className="text-2xl font-extrabold block text-blue-600 dark:text-blue-400 mt-1">
                       {scanStatus.stats?.questionPapers || 0}
                     </span>
                   </div>
-                  <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
-                    <span className="text-muted-foreground block text-[10px]">Answer Keys</span>
-                    <span className="text-xl font-extrabold block text-primary mt-1">
+                  <div className="bg-slate-50 dark:bg-muted/20 rounded-2xl p-4 border border-border">
+                    <span className="text-muted-foreground block text-[10px] font-bold uppercase tracking-wider">ANSWER KEYS</span>
+                    <span className="text-2xl font-extrabold block text-blue-600 dark:text-blue-400 mt-1">
                       {scanStatus.stats?.answerKeys || 0}
                     </span>
                   </div>
-                  <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
-                    <span className="text-muted-foreground block text-[10px]">Unknowns</span>
-                    <span className="text-xl font-extrabold block text-primary mt-1">
+                  <div className="bg-slate-50 dark:bg-muted/20 rounded-2xl p-4 border border-border">
+                    <span className="text-muted-foreground block text-[10px] font-bold uppercase tracking-wider">UNKNOWNS</span>
+                    <span className="text-2xl font-extrabold block text-blue-600 dark:text-blue-400 mt-1">
                       {scanStatus.stats?.unknownFiles || 0}
                     </span>
                   </div>
@@ -594,7 +594,7 @@ function BulkImport() {
                   ))}
                 </div>
 
-                <div className="flex gap-3 justify-end border-t border-border pt-4">
+                <div className="flex gap-3 justify-center border-t border-border pt-4">
                   <button
                     onClick={handleCancelQueue}
                     className="flex items-center gap-1.5 rounded-xl border border-border px-5 py-2.5 text-sm font-semibold hover:bg-accent"
@@ -621,7 +621,7 @@ function BulkImport() {
                     ) : scanStatus.status === "paused" ? (
                       <Pause className="h-5 w-5 text-amber-500 animate-pulse" />
                     ) : (
-                      <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                      <Loader2 className="h-5 w-5 animate-spin text-blue-600 dark:text-blue-400" />
                     )}
                     {scanStatus.currentStep?.includes("Rate limit")
                       ? "Rate Limit Hit — Cooling Down (60s)"
@@ -661,25 +661,25 @@ function BulkImport() {
 
                 {/* Stats */}
                 <div className="grid grid-cols-4 gap-3 text-center text-xs">
-                  <div className="rounded-lg border border-border bg-background p-2">
-                    <span className="text-muted-foreground block text-[10px]">Total Files</span>
-                    <span className="text-lg font-bold">{scanStatus.stats?.totalFiles || 0}</span>
+                  <div className="rounded-xl border border-border bg-background p-3">
+                    <span className="text-muted-foreground block text-[10px] font-semibold">Total Files</span>
+                    <span className="text-lg font-extrabold block mt-0.5">{scanStatus.stats?.totalFiles || 0}</span>
                   </div>
-                  <div className="rounded-lg border border-border bg-background p-2">
-                    <span className="text-muted-foreground block text-[10px]">Processed</span>
-                    <span className="text-lg font-bold">
+                  <div className="rounded-xl border border-border bg-background p-3">
+                    <span className="text-muted-foreground block text-[10px] font-semibold">Processed</span>
+                    <span className="text-lg font-extrabold block mt-0.5">
                       {scanStatus.items?.filter((i) => i.status !== "pending" && i.status !== "processing").length || 0}
                     </span>
                   </div>
-                  <div className="rounded-lg border border-border bg-background p-2">
-                    <span className="text-muted-foreground block text-[10px]">AI Fallbacks</span>
-                    <span className="text-lg font-bold text-primary">
+                  <div className="rounded-xl border border-border bg-background p-3">
+                    <span className="text-muted-foreground block text-[10px] font-semibold">AI Fallbacks</span>
+                    <span className="text-lg font-extrabold block text-blue-600 dark:text-blue-400 mt-0.5">
                       {scanStatus.items?.filter((i) => i.used_ai).length || 0}
                     </span>
                   </div>
-                  <div className="rounded-lg border border-border bg-background p-2">
-                    <span className="text-muted-foreground block text-[10px]">Failed</span>
-                    <span className="text-lg font-bold text-destructive">
+                  <div className="rounded-xl border border-border bg-background p-3">
+                    <span className="text-muted-foreground block text-[10px] font-semibold">Failed</span>
+                    <span className="text-lg font-extrabold block text-red-600 dark:text-red-400 mt-0.5">
                       {scanStatus.items?.filter((i) => i.status === "failed").length || 0}
                     </span>
                   </div>
@@ -692,23 +692,23 @@ function BulkImport() {
                       <div className="truncate pr-4 flex items-center gap-2">
                         {item.status === "completed" && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
                         {item.status === "failed" && <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />}
-                        {item.status === "processing" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
+                        {item.status === "processing" && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600 dark:text-blue-400 shrink-0" />}
                         {item.status === "pending" && <div className="h-3.5 w-3.5 rounded-full border border-border shrink-0" />}
-                        <span className={`truncate ${item.status === "processing" ? "font-bold" : ""}`}>
+                        <span className={`truncate ${item.status === "processing" ? "font-bold text-foreground" : ""}`}>
                           {item.name}
                         </span>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         {item.used_ai && (
-                          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[9px] font-bold text-primary">
+                          <span className="rounded bg-blue-100 dark:bg-blue-900/30 px-2 py-0.5 text-[9px] font-bold text-blue-600 dark:text-blue-400">
                             AI
                           </span>
                         )}
                         <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
                           item.status === "completed" ? "bg-green-500/10 text-green-600" :
                           item.status === "failed" ? "bg-red-500/10 text-red-600" :
-                          item.status === "processing" ? "bg-primary/10 text-primary animate-pulse" :
-                          "bg-muted text-muted-foreground"
+                          item.status === "processing" ? "bg-blue-500/10 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400 animate-pulse" :
+                          "bg-slate-100 text-slate-500 dark:bg-zinc-800 dark:text-zinc-400"
                         }`}>
                           {item.status}
                         </span>
