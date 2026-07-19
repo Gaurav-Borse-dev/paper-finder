@@ -1,5 +1,6 @@
 import { Router, type Response } from "express";
 import { PDFParse } from "pdf-parse";
+import { createWorker } from "tesseract.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import { supabase, getSupabaseAdmin } from "../lib/supabase.js";
@@ -88,9 +89,20 @@ router.post(
       try {
         const pdfBuffer = Buffer.from(pdfBase64, "base64");
         const parser = new PDFParse({ data: pdfBuffer });
-        const data = await parser.getText();
+        const data = await parser.getText({ first: 1 });
         await parser.destroy();
         localText = data.text || "";
+
+        // Level 4 OCR fallback for scanned PDFs
+        if (localText.trim().length < 100) {
+          console.log(`[OCR] Direct upload: Short text (${localText.trim().length} chars). Triggering Level 4 OCR...`);
+          const ocrText = await ocrViaTesseract(pdfBuffer);
+          if (ocrText && ocrText.trim().length >= 100) {
+            console.log(`[OCR] Successfully OCR'd ${ocrText.trim().length} chars.`);
+            localText = ocrText;
+          }
+        }
+
         // Step 3: Heuristic extraction
         localResult = await localExtract(localText, filename || undefined);
       } catch (e) {
@@ -496,7 +508,8 @@ export const SUBJECTS_ALIASES: Record<string, string> = {
   "IPCV-II": "Image Processing and Computer Vision - II",
   "QBM": "Quantitative Business Methods",
   "PROB & STAT": "Probability and Statistics",
-  "Software Engg.": "Software Engineering"
+  "Software Engg.": "Software Engineering",
+  "MFEE": "Mathematics for Electrical Engineering"
 };
 
 const DEPT_ABBRS: Record<string, string[]> = {
@@ -510,14 +523,84 @@ const DEPT_ABBRS: Record<string, string[]> = {
   "Data Science": ["aids", "data science", "cseds", "ds"],
 };
 
-function lookupSubjectAlias(str: string): string | null {
-  const normalized = str.toUpperCase();
-  for (const [abbr, fullName] of Object.entries(SUBJECTS_ALIASES)) {
+function getLevenshteinDistance(a: string, b: string): number {
+  const matrix: number[][] = [];
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          Math.min(
+            matrix[i][j - 1] + 1, // insertion
+            matrix[i - 1][j] + 1  // deletion
+          )
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function lookupSubjectAlias(str: string, dynamicAliases?: Record<string, string>): string | null {
+  const normalized = str.toUpperCase().trim();
+  if (!normalized) return null;
+
+  // Combine static and dynamic aliases
+  const combinedAliases = {
+    ...SUBJECTS_ALIASES,
+    ...dynamicAliases
+  };
+
+  // 1. Try exact abbreviation/regex matches
+  for (const [abbr, fullName] of Object.entries(combinedAliases)) {
     const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
     if (regex.test(normalized)) {
       return fullName;
     }
   }
+
+  // 2. Try exact full subject match (in case file already contains the full name)
+  for (const fullName of Object.values(combinedAliases)) {
+    if (fullName.toUpperCase() === normalized) {
+      return fullName;
+    }
+  }
+
+  // 3. Fuzzy matching: if Levenshtein distance <= 3 from any alias value (full subject names) or alias abbreviation keys (for words > 3 chars)
+  let bestMatch: string | null = null;
+  let minDistance = Infinity;
+
+  for (const [abbr, fullName] of Object.entries(combinedAliases)) {
+    // Check against full name
+    const distFullName = getLevenshteinDistance(normalized, fullName.toUpperCase());
+    if (distFullName <= 3 && distFullName < minDistance) {
+      minDistance = distFullName;
+      bestMatch = fullName;
+    }
+
+    // Check against abbreviation if abbreviation is long enough
+    if (abbr.length >= 4) {
+      const distAbbr = getLevenshteinDistance(normalized, abbr.toUpperCase());
+      if (distAbbr <= 1 && distAbbr < minDistance) {
+        minDistance = distAbbr;
+        bestMatch = fullName;
+      }
+    }
+  }
+
+  if (minDistance <= 3) {
+    console.log(`[Fuzzy Match] matched '${str}' to '${bestMatch}' (Levenshtein distance: ${minDistance})`);
+    return bestMatch;
+  }
+
   return null;
 }
 
@@ -613,14 +696,14 @@ function matchSubjectCode(str: string): string | null {
   return null;
 }
 
-export function parseFromFilename(filename: string): ExtractionResult {
+export function parseFromFilename(filename: string, dynamicAliases?: Record<string, string>): ExtractionResult {
   const result: ExtractionResult = JSON.parse(JSON.stringify(EMPTY_RESULT));
   if (!filename) return result;
 
   const fnClean = filename.replace(/\.pdf$/i, "").replace(/[\_\-]+/g, " ").trim();
 
   // Try alias lookup first (abbreviations like BEEDE, DSA, EM-III)
-  const alias = lookupSubjectAlias(fnClean);
+  const alias = lookupSubjectAlias(fnClean, dynamicAliases);
   if (alias) {
     result.subject = { value: alias, confidence: 0.95 };
   }
@@ -637,6 +720,7 @@ export function parseFromFilename(filename: string): ExtractionResult {
       .replace(/\b(?:COMP|MECH|CIVIL|ETC|ELECT|AIML|AIDS|CSEDS|DS|IT|MCA|FYALL|FY ALL|SY ALL|ALL|GL)\b/gi, "")
       .replace(/\b\d{2}[\.\/]\d{2}[\.\/]\d{4}\b/g, "") // dates like 12.01.2024
       .replace(/\b\d{8,}\b/g, "") // long number sequences
+      .replace(/\b(?:20)?\d{2}\s*[-/]\s*\d{2}\b/g, "") // academic year ranges like 24-25, 2024-25, 24/25
       .replace(/\b(20\d{2})\s*-?\s*(\d{2})\b/g, "") // academic year
       .replace(/\b(50|60|65|70|75|80|100)\s*[Mm]?\b/g, "") // marks
       .replace(/\b(?:GR|Group)\s*[A-Z]\b/gi, "") // group markers
@@ -644,8 +728,9 @@ export function parseFromFilename(filename: string): ExtractionResult {
       .replace(/\b[A-Z]{2,4}\d{3,}[A-Z]?\b/g, "") // course codes like RCP23VCPC301
       .replace(/\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+20\d{2}\b/gi, "") // "29 Jan 2025"
       .replace(/\b(?:compressed|_compressed|solution|Solution)\b/gi, "")
-      .replace(/^\d+\.\s*/, "") // leading numbering "1." "7."
       .replace(/\s*@+\s*/g, "") // trailing @
+      .replace(/^\s*[\d\.\-\_\s]+/g, "") // strip leading digits, dots, dashes, spaces
+      .replace(/^[^\w\s]+|[^\w\s]+$/g, "") // strip leading/trailing non-alphanumeric punctuation
       .replace(/\s+/g, " ")
       .trim();
 
@@ -748,8 +833,21 @@ export async function localExtract(text: string, filename?: string, folderPath?:
   const fnToScan = filename || "";
   const normalizedText = textToScan.replace(/\s+/g, " ");
 
+  // Load learned aliases dynamically from DB
+  const dynamicAliases: Record<string, string> = {};
+  try {
+    const { data: dbAliases } = await supabase.from("learned_aliases").select("alias, full_name");
+    if (dbAliases) {
+      for (const item of dbAliases) {
+        dynamicAliases[item.alias.toUpperCase()] = item.full_name;
+      }
+    }
+  } catch (err) {
+    console.error("Error loading learned aliases:", err);
+  }
+
   // Level 1: Filename parsing (confidence 0.95)
-  const fnResult = parseFromFilename(fnToScan);
+  const fnResult = parseFromFilename(fnToScan, dynamicAliases);
 
   // Level 2: Folder path parsing (confidence 0.90)
   const pathResult = parseFromFolderPath(folderPath || "");
@@ -1055,6 +1153,74 @@ export function parseExtraction(raw: string): ExtractionResult | null {
     };
   } catch {
     return null;
+  }
+}
+
+export async function ocrViaGemini(pdfBase64: string): Promise<string> {
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (!geminiApiKey) return "";
+
+  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
+
+  const prompt = `Extract ALL visible text from this PDF page exactly as it appears. Return ONLY the raw text, no formatting, no JSON, no explanation. Include headers, footers, exam details, subject names, dates, marks — everything visible.`;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          role: "user",
+          parts: [
+            { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
+            { text: prompt },
+          ],
+        }],
+      }),
+    });
+
+    if (!response.ok) return "";
+
+    const body = (await response.json()) as any;
+    return body.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  } catch (err) {
+    console.error("ocrViaGemini fetch error:", err);
+    return "";
+  }
+}
+
+export async function ocrViaTesseract(pdfBuffer: Buffer): Promise<string> {
+  try {
+    const parser = new PDFParse({ data: pdfBuffer });
+    const screenshot = await parser.getScreenshot({ first: 1, imageBuffer: true });
+    await parser.destroy();
+    
+    if (!screenshot.pages || screenshot.pages.length === 0) {
+      throw new Error("No pages rendered for OCR");
+    }
+    
+    const pageData = screenshot.pages[0];
+    if (!pageData.data || pageData.data.length === 0) {
+      throw new Error("Rendered page has no image buffer data");
+    }
+    
+    const buffer = Buffer.from(pageData.data);
+    const worker = await createWorker("eng");
+    const { data: { text } } = await worker.recognize(buffer);
+    await worker.terminate();
+    
+    console.log(`[OCR] Tesseract successfully extracted ${text.length} chars.`);
+    return text;
+  } catch (err: any) {
+    console.warn(`[OCR] Local Tesseract OCR failed, falling back to Gemini Vision:`, err.message || err);
+    try {
+      const pdfBase64 = pdfBuffer.toString("base64");
+      return await ocrViaGemini(pdfBase64);
+    } catch (fallbackErr) {
+      console.error("[OCR] Gemini Vision fallback failed too:", fallbackErr);
+      return "";
+    }
   }
 }
 

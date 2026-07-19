@@ -4,7 +4,7 @@ import { getSupabaseAdmin } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import type { AuthenticatedRequest, ExtractionResult, ExtractionField } from "../types.js";
-import { localExtract, needsAi, mergeResults, SYSTEM_PROMPT, parseExtraction } from "./extract.js";
+import { localExtract, needsAi, mergeResults, SYSTEM_PROMPT, parseExtraction, ocrViaTesseract } from "./extract.js";
 import crypto from "crypto";
 
 const router = Router();
@@ -18,13 +18,37 @@ function extractFolderId(url: string): string | null {
   return match ? match[1] : null;
 }
 
-function classifyFile(filename: string, folderPath: string, text: string): "Question Paper" | "Answer Key" | "Unknown" {
+type DocumentType = "Question Paper" | "Answer Key" | "Timetable" | "Notice" | "Circular" | "Syllabus" | "Unknown";
+
+function classifyFile(filename: string, folderPath: string, text: string): DocumentType {
   const nameLower = filename.toLowerCase();
   const pathLower = folderPath.toLowerCase();
   const textLower = text.slice(0, 1000).toLowerCase();
+  const combined = `${nameLower} ${pathLower} ${textLower}`;
 
-  const akKeywords = ["solution", "answer key", "solved paper", "soln", "solutions", "ak", "answer-key", "answer_key"];
-  const qpKeywords = ["question paper", "qp", "question-paper", "question_paper", "paper"];
+  // --- Non-exam documents (check first so they get skipped) ---
+  const timetableKeywords = ["time table", "timetable", "time-table", "exam schedule", "examination schedule"];
+  for (const kw of timetableKeywords) {
+    if (combined.includes(kw)) return "Timetable";
+  }
+
+  const noticeKeywords = ["notice", "notification", "important notice"];
+  if (/\bnotice\b|\bnotification\b/.test(nameLower) || /\bnotice\b/.test(pathLower.split("/").pop() || "")) {
+    return "Notice";
+  }
+
+  if (/\bcircular\b/.test(nameLower) || /\bcircular\b/.test(pathLower.split("/").pop() || "")) {
+    return "Circular";
+  }
+
+  const syllabusKeywords = ["syllabus", "course outline", "curriculum", "course structure"];
+  for (const kw of syllabusKeywords) {
+    if (nameLower.includes(kw) || (pathLower.split("/").pop() || "").includes(kw)) return "Syllabus";
+  }
+
+  // --- Answer Key detection ---
+  const akKeywords = ["solution", "answer key", "solved paper", "soln", "solutions", "answer-key", "answer_key", "marking scheme"];
+  const qpKeywords = ["question paper", "question-paper", "question_paper", "synoptics"];
 
   const pathParts = pathLower.split("/");
   const lastPathPart = pathParts[pathParts.length - 1] || "";
@@ -33,25 +57,32 @@ function classifyFile(filename: string, folderPath: string, text: string): "Ques
   if (lastPathPart.includes("solution") || lastPathPart.includes("answer") || secondLastPathPart.includes("solution")) {
     return "Answer Key";
   }
-  if (lastPathPart.includes("question") || lastPathPart.includes("qp") || secondLastPathPart.includes("question")) {
+  if (lastPathPart.includes("question") || /\bqp\b/.test(lastPathPart) || secondLastPathPart.includes("question")) {
     return "Question Paper";
   }
 
+  // Check filename for AK markers (must check before QP because "ak" is shorter)
+  if (/\bak\b/.test(nameLower)) return "Answer Key";
   for (const keyword of akKeywords) {
-    if (nameLower.includes(keyword)) {
-      return "Answer Key";
-    }
-  }
-  for (const keyword of qpKeywords) {
-    if (nameLower.includes(keyword)) {
-      return "Question Paper";
-    }
+    if (nameLower.includes(keyword)) return "Answer Key";
   }
 
-  if (textLower.includes("scheme of valuation") || textLower.includes("solution") || textLower.includes("answer key") || textLower.includes("marking scheme")) {
+  // Check filename for QP markers
+  if (/\bqp\b/.test(nameLower)) return "Question Paper";
+  for (const keyword of qpKeywords) {
+    if (nameLower.includes(keyword)) return "Question Paper";
+  }
+
+  // Check text content
+  if (textLower.includes("scheme of valuation") || textLower.includes("answer key") || textLower.includes("marking scheme")) {
     return "Answer Key";
   }
-  if (textLower.includes("question paper") || textLower.includes("maximum marks")) {
+  if (textLower.includes("question paper") || textLower.includes("maximum marks") || textLower.includes("max. marks")) {
+    return "Question Paper";
+  }
+
+  // If the filename has typical exam paper patterns (marks + dept + sem + subject), classify as QP
+  if (/\b(50|60|65|70|75|80|100)\b/.test(nameLower) && /\bsem\b/i.test(nameLower)) {
     return "Question Paper";
   }
 
@@ -61,20 +92,23 @@ function classifyFile(filename: string, folderPath: string, text: string): "Ques
 function calculateMatchScore(qp: any, ak: any): number {
   let score = 0;
 
+  // 1. Proximity of parent folder
   const qpPathClean = qp.path.replace(/\b(question\s*papers?|question|qp|solutions?|answers?|ak)\b/ig, "").replace(/\/+/g, "/").trim();
   const akPathClean = ak.path.replace(/\b(question\s*papers?|question|qp|solutions?|answers?|ak)\b/ig, "").replace(/\/+/g, "/").trim();
   if (qpPathClean && qpPathClean === akPathClean) {
-    score += 15;
+    score += 20;
   }
 
+  // 2. Subject Name matching
   const qpSub = (qp.metadata.subject?.value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const akSub = (ak.metadata.subject?.value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   if (qpSub && qpSub === akSub) {
-    score += 15;
+    score += 30;
   } else if (qpSub && akSub && (qpSub.includes(akSub) || akSub.includes(qpSub))) {
-    score += 8;
+    score += 15;
   }
 
+  // 3. Filename Similarity
   const cleanName = (name: string) => name.toLowerCase()
     .replace(/\.pdf$/i, "")
     .replace(/\b(solution|soln|solved|answer|key|qp|question|paper|ak)\b/ig, "")
@@ -83,64 +117,57 @@ function calculateMatchScore(qp: any, ak: any): number {
   const qpNameClean = cleanName(qp.name);
   const akNameClean = cleanName(ak.name);
   if (qpNameClean && qpNameClean === akNameClean) {
-    score += 10;
+    score += 15;
   } else if (qpNameClean && akNameClean && (qpNameClean.includes(akNameClean) || akNameClean.includes(qpNameClean))) {
-    score += 5;
+    score += 8;
   }
 
+  // Fuzzy filename matching (word intersection)
+  const getWords = (name: string) => name.toLowerCase()
+    .replace(/\.pdf$/i, "")
+    .split(/[\s\-\_\.]+/);
+  const qpWords = getWords(qp.name).filter(w => w.length > 2 && !["solution", "soln", "solved", "answer", "key", "qp", "question", "paper", "ak"].includes(w));
+  const akWords = getWords(ak.name).filter(w => w.length > 2 && !["solution", "soln", "solved", "answer", "key", "qp", "question", "paper", "ak"].includes(w));
+  
+  if (qpWords.length > 0 && akWords.length > 0) {
+    let intersectCount = 0;
+    for (const qw of qpWords) {
+      if (akWords.includes(qw)) intersectCount++;
+    }
+    const overlapRatio = intersectCount / Math.max(qpWords.length, akWords.length);
+    if (overlapRatio > 0.6) {
+      score += 10;
+    }
+  }
+
+  // 4. Subject Code (Course Code) matching
+  const qpCode = (qp.metadata.subject_code?.value || "").toUpperCase().replace(/\s+/g, "");
+  const akCode = (ak.metadata.subject_code?.value || "").toUpperCase().replace(/\s+/g, "");
+  if (qpCode && qpCode === akCode) {
+    score += 25;
+  }
+
+  // 5. Context matches
   if (qp.metadata.academic_year?.value && qp.metadata.academic_year?.value === ak.metadata.academic_year?.value) {
-    score += 5;
+    score += 10;
   }
 
   if (qp.metadata.exam_type?.value && qp.metadata.exam_type?.value === ak.metadata.exam_type?.value) {
-    score += 5;
+    score += 10;
   }
 
   if (qp.metadata.semester?.value && qp.metadata.semester?.value === ak.metadata.semester?.value) {
-    score += 5;
+    score += 15;
   }
 
   if (qp.metadata.department?.value && qp.metadata.department?.value === ak.metadata.department?.value) {
-    score += 5;
+    score += 10;
   }
 
   return score;
 }
 
-/**
- * Level 4 OCR: Lightweight Gemini Vision call to extract raw text from scanned PDFs.
- * This is MUCH cheaper than a full metadata extraction call — we just ask for the text,
- * then run our local heuristic pipeline on the OCR'd output.
- * Only called when pdf-parse returns < 100 chars of text (indicating a scanned/image PDF).
- */
-async function ocrViaGemini(pdfBase64: string): Promise<string> {
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-  if (!geminiApiKey) return "";
 
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
-
-  const prompt = `Extract ALL visible text from this PDF page exactly as it appears. Return ONLY the raw text, no formatting, no JSON, no explanation. Include headers, footers, exam details, subject names, dates, marks — everything visible.`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{
-        role: "user",
-        parts: [
-          { inlineData: { mimeType: "application/pdf", data: pdfBase64 } },
-          { text: prompt },
-        ],
-      }],
-    }),
-  });
-
-  if (!response.ok) return "";
-
-  const body = (await response.json()) as any;
-  return body.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-}
 
 async function extractMetadataViaGemini(
   pdfBase64: string,
@@ -197,12 +224,67 @@ async function extractMetadataViaGemini(
   return parseExtraction(raw);
 }
 
+interface DriveFileMetadata {
+  id: string;
+  name: string;
+  size?: number;
+  webViewLink?: string;
+  path: string;
+  modifiedTime?: string;
+  createdTime?: string;
+  md5Checksum?: string;
+}
+
+async function fetchExistingPapersForFiles(fileIds: string[]) {
+  const supabaseAdmin = getSupabaseAdmin();
+  const dbPapersMap = new Map<string, { paper: any; role: "qp" | "ak" }>();
+  
+  const chunkSize = 500;
+  for (let i = 0; i < fileIds.length; i += chunkSize) {
+    const chunk = fileIds.slice(i, i + chunkSize);
+    
+    // Check matching QP
+    const { data: qpMatch, error: qpErr } = await supabaseAdmin
+      .from("papers")
+      .select("id, subject, department, semester, academic_year, exam_type, marks, exam_date, question_paper_file_id, question_paper_checksum, question_paper_modified_time, question_paper_size, answer_key_file_id, answer_key_checksum, answer_key_modified_time, answer_key_size")
+      .in("question_paper_file_id", chunk);
+      
+    if (qpErr) {
+      console.error("fetchExistingPapersForFiles QP error:", qpErr);
+    } else if (qpMatch) {
+      for (const p of qpMatch) {
+        if (p.question_paper_file_id) {
+          dbPapersMap.set(p.question_paper_file_id, { paper: p, role: "qp" });
+        }
+      }
+    }
+    
+    // Check matching AK
+    const { data: akMatch, error: akErr } = await supabaseAdmin
+      .from("papers")
+      .select("id, subject, department, semester, academic_year, exam_type, marks, exam_date, question_paper_file_id, question_paper_checksum, question_paper_modified_time, question_paper_size, answer_key_file_id, answer_key_checksum, answer_key_modified_time, answer_key_size")
+      .in("answer_key_file_id", chunk);
+      
+    if (akErr) {
+      console.error("fetchExistingPapersForFiles AK error:", akErr);
+    } else if (akMatch) {
+      for (const p of akMatch) {
+        if (p.answer_key_file_id) {
+          dbPapersMap.set(p.answer_key_file_id, { paper: p, role: "ak" });
+        }
+      }
+    }
+  }
+  
+  return dbPapersMap;
+}
+
 async function listPdfFilesRecursively(
   folderId: string,
   accessToken: string,
   onFolderScanned: (count: number) => void
-): Promise<Array<{ id: string; name: string; size?: number; webViewLink?: string; path: string }>> {
-  const files: Array<{ id: string; name: string; size?: number; webViewLink?: string; path: string }> = [];
+): Promise<Array<DriveFileMetadata>> {
+  const files: Array<DriveFileMetadata> = [];
   const visited = new Set<string>();
 
   const scanFolder = async (id: string, path: string) => {
@@ -216,7 +298,7 @@ async function listPdfFilesRecursively(
       const q = `'${id}' in parents and trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')`;
       const url = new URL("https://www.googleapis.com/drive/v3/files");
       url.searchParams.append("q", q);
-      url.searchParams.append("fields", "nextPageToken, files(id, name, mimeType, size, webViewLink)");
+      url.searchParams.append("fields", "nextPageToken, files(id, name, mimeType, size, webViewLink, parents, modifiedTime, createdTime, md5Checksum)");
       url.searchParams.append("pageSize", "1000");
       if (nextPageToken) {
         url.searchParams.append("pageToken", nextPageToken);
@@ -233,7 +315,16 @@ async function listPdfFilesRecursively(
 
       const data = (await response.json()) as {
         nextPageToken?: string;
-        files: Array<{ id: string; name: string; mimeType: string; size?: string; webViewLink?: string }>;
+        files: Array<{
+          id: string;
+          name: string;
+          mimeType: string;
+          size?: string;
+          webViewLink?: string;
+          modifiedTime?: string;
+          createdTime?: string;
+          md5Checksum?: string;
+        }>;
       };
 
       for (const file of data.files) {
@@ -247,6 +338,9 @@ async function listPdfFilesRecursively(
             size: sizeBytes,
             webViewLink: file.webViewLink,
             path,
+            modifiedTime: file.modifiedTime,
+            createdTime: file.createdTime,
+            md5Checksum: file.md5Checksum,
           });
         }
       }
@@ -256,9 +350,9 @@ async function listPdfFilesRecursively(
     onFolderScanned(files.length);
 
     // Scan subfolders concurrently with a concurrency limit of 5
-    const limit = 5;
-    for (let i = 0; i < subfolders.length; i += limit) {
-      const chunk = subfolders.slice(i, i + limit);
+    const chunkLimit = 5;
+    for (let i = 0; i < subfolders.length; i += chunkLimit) {
+      const chunk = subfolders.slice(i, i + chunkLimit);
       await Promise.all(
         chunk.map((sf) => {
           const subPath = path ? `${path}/${sf.name}` : sf.name;
@@ -418,14 +512,29 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           const arrayBuffer = await downloadRes.arrayBuffer();
           fileBuffer = Buffer.from(arrayBuffer);
 
-          // 2. Parse text locally
+          // 2. Parse text locally (first page only for speed)
           const parser = new PDFParse({ data: fileBuffer });
-          const textData = await parser.getText();
+          const textData = await parser.getText({ first: 1 });
           await parser.destroy();
           localText = textData.text || "";
 
           // 3. Local extraction
           localResult = await localExtract(localText, item.name, item.path);
+
+          // 3b. Level 4 OCR fallback if text is extremely short (< 100 chars)
+          if (localText.trim().length < 100 && fileBuffer) {
+            console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
+            try {
+              const ocrText = await ocrViaTesseract(fileBuffer);
+              if (ocrText && ocrText.trim().length >= 50) {
+                console.log(`[OCR] Tesseract extracted ${ocrText.trim().length} chars for ${item.name}. Re-running local extraction.`);
+                localText = ocrText;
+                localResult = await localExtract(localText, item.name, item.path);
+              }
+            } catch (ocrErr) {
+              console.error(`Tesseract OCR failed for ${item.name}:`, ocrErr);
+            }
+          }
         } catch (err: any) {
           console.error(`Error processing file ${item.name}:`, err);
           extractionError = err instanceof Error ? err.message : String(err);
@@ -456,8 +565,13 @@ async function processQueue(jobId: string, googleAccessToken: string) {
         });
         const avgConf = totalConf / coreFields.length;
 
-        // Only call Gemini if confidence is below 60% (0.60)
-        const needsAiExtraction = avgConf < 0.60 && needsAi(finalResult);
+        // Only call Gemini if confidence is below 70% (0.70)
+        const needsAiExtraction = avgConf < 0.70 && needsAi(finalResult);
+
+        // Mark low-confidence items for review
+        if (avgConf < 0.70) {
+          (finalResult as any)._needs_review = true;
+        }
 
         if (needsAiExtraction && fileBuffer) {
           const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -469,6 +583,7 @@ async function processQueue(jobId: string, googleAccessToken: string) {
               const pdfBase64 = fileBuffer.toString("base64");
               const highConfFields: any = {};
               Object.keys(finalResult).forEach((key) => {
+                if (key.startsWith("_")) return; // skip internal flags
                 const field = finalResult[key as keyof ExtractionResult];
                 if (field && field.confidence >= 0.85) {
                   highConfFields[key] = field.value;
@@ -479,20 +594,51 @@ async function processQueue(jobId: string, googleAccessToken: string) {
               if (apiResult) {
                 finalResult = mergeResults(finalResult, apiResult);
                 usedAi = true;
+                // Re-check confidence after AI merge
+                let newTotalConf = 0;
+                coreFields.forEach((field) => {
+                  const val = finalResult[field as keyof ExtractionResult];
+                  newTotalConf += val ? val.confidence : 0;
+                });
+                if (newTotalConf / coreFields.length >= 0.70) {
+                  (finalResult as any)._needs_review = false;
+                }
               }
             } catch (geminiErr: any) {
-              console.error(`Gemini fallback failed for ${item.name}:`, geminiErr);
-              extractionError = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
+              // NEVER fail the import because of Gemini errors
+              const errMsg = geminiErr?.message || String(geminiErr);
+              const isQuotaOrTransient = /429|403|500|timeout|quota|ECONNREFUSED|ENOTFOUND|fetch failed/i.test(errMsg);
+              if (isQuotaOrTransient) {
+                console.warn(`[Gemini] Transient error for ${item.name}: ${errMsg}. Saving with local metadata.`);
+              } else {
+                console.error(`[Gemini] Unexpected error for ${item.name}:`, geminiErr);
+              }
+              (finalResult as any)._needs_review = true;
+              // DO NOT set extractionError — this is not a failure
             }
+          } else {
+            // No Gemini key configured — save with local data, mark for review
+            (finalResult as any)._needs_review = true;
           }
         }
 
-        // Update item in database
+        // Merge drive sync tracking metadata so we don't lose updates/checksums
+        const finalMetadata = {
+          ...finalResult,
+          isUpdate: item.metadata?.isUpdate || false,
+          existingPaperId: item.metadata?.existingPaperId || null,
+          role: item.metadata?.role || null,
+          drive_checksum: item.metadata?.drive_checksum || null,
+          drive_modified_time: item.metadata?.drive_modified_time || null,
+          drive_size: item.size || null,
+        };
+
+        // Update item in database — ALWAYS completed, never failed due to AI
         await supabaseAdmin
           .from("bulk_import_items")
           .update({
-            status: extractionError && !usedAi ? "failed" : "completed",
-            metadata: finalResult,
+            status: "completed",
+            metadata: finalMetadata,
             type: classification,
             error: extractionError || null,
             used_ai: usedAi,
@@ -562,13 +708,13 @@ async function finalizeMatchedResults(jobId: string) {
   await supabaseAdmin
     .from("bulk_import_jobs")
     .update({
-      current_step: "Matching Question Papers & Answer Keys...",
+      current_step: "Matching and resolving duplicates...",
       progress: 90,
       updated_at: new Date().toISOString(),
     })
     .eq("id", jobId);
 
-  // Fetch all completed items
+  // Fetch all completed/skipped items for this job
   const { data: items } = await supabaseAdmin
     .from("bulk_import_items")
     .select("*")
@@ -587,154 +733,268 @@ async function finalizeMatchedResults(jobId: string) {
     return;
   }
 
-  const qps = items.filter((r) => r.type === "Question Paper");
-  const aks = items.filter((r) => r.type === "Answer Key");
-  const unknowns = items.filter((r) => r.type === "Unknown");
+  const qps = items.filter((r) => r.type === "Question Paper" && r.status === "completed");
+  const aks = items.filter((r) => r.type === "Answer Key" && r.status === "completed");
+  const unknowns = items.filter((r) => r.type === "Unknown" && r.status === "completed");
+  const skippedItems = items.filter((r) => r.status === "skipped");
+
+  // Fetch existing papers from DB that match the subjects of processed items
+  const subjectsInBatch = Array.from(new Set(
+    items.map(item => item.metadata?.subject?.value).filter(Boolean)
+  ));
+  
+  let dbPapers: any[] = [];
+  if (subjectsInBatch.length > 0) {
+    const { data } = await supabaseAdmin
+      .from("papers")
+      .select("*")
+      .in("subject", subjectsInBatch);
+    if (data) dbPapers = data;
+  }
 
   const matchedPapers: any[] = [];
   const usedAkIds = new Set<string>();
 
+  // Helper to normalize string for comparison
+  const norm = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  // Helper to find existing paper in DB by metadata
+  const findDbPaperByMeta = (meta: any) => {
+    return dbPapers.find(p => 
+      norm(p.subject) === norm(meta.subject?.value) &&
+      norm(p.department) === norm(meta.department?.value) &&
+      p.semester === Number(meta.semester?.value) &&
+      norm(p.academic_year) === norm(meta.academic_year?.value) &&
+      norm(p.exam_type) === norm(meta.exam_type?.value) &&
+      p.marks === Number(meta.marks?.value)
+    );
+  };
+
+  // Process Question Papers
   for (const qp of qps) {
+    const qpMeta = qp.metadata;
+    let isUpdate = qpMeta.isUpdate === true;
+    let existingPaperId = qpMeta.existingPaperId || null;
+    let dbPaper = existingPaperId ? dbPapers.find(p => p.id === existingPaperId) : null;
+
+    if (!dbPaper) {
+      // Try to find matching paper by metadata in DB (in case of duplicate or un-tracked file ID)
+      dbPaper = findDbPaperByMeta(qpMeta);
+      if (dbPaper) {
+        isUpdate = true;
+        existingPaperId = dbPaper.id;
+      }
+    }
+
+    // Try to find a matching Answer Key in the current batch
     let bestAk: any = null;
     let bestScore = -1;
 
     for (const ak of aks) {
       if (usedAkIds.has(ak.id)) continue;
       const score = calculateMatchScore(qp, ak);
-      if (score >= 25 && score > bestScore) {
+      // Auto pair if score >= 20
+      if (score >= 20 && score > bestScore) {
         bestScore = score;
         bestAk = ak;
       }
     }
 
+    const needsReview =
+      qpMeta._needs_review === true ||
+      bestAk?.metadata?._needs_review === true ||
+      !qpMeta.subject?.value ||
+      qpMeta.subject?.value === "Unknown Subject" ||
+      qpMeta.department?.value === "Unknown";
+
+    let status = "Ready";
+    if (needsReview) {
+      status = "Needs Review";
+    }
+
+    // Prepare match record
+    const matchRecord: any = {
+      subject: qpMeta.subject?.value || bestAk?.metadata?.subject?.value || dbPaper?.subject || "Unknown Subject",
+      subject_code: qpMeta.subject_code?.value || bestAk?.metadata?.subject_code?.value || dbPaper?.subject_code || null,
+      department: qpMeta.department?.value || bestAk?.metadata?.department?.value || dbPaper?.department || "Unknown",
+      semester: qpMeta.semester?.value || bestAk?.metadata?.semester?.value || dbPaper?.semester || 1,
+      academic_year: qpMeta.academic_year?.value || bestAk?.metadata?.academic_year?.value || dbPaper?.academic_year || "2024-25",
+      exam_type: qpMeta.exam_type?.value || bestAk?.metadata?.exam_type?.value || dbPaper?.exam_type || "ESE",
+      marks: qpMeta.marks?.value || bestAk?.metadata?.marks?.value || dbPaper?.marks || 70,
+      exam_date: qpMeta.exam_date?.value || bestAk?.metadata?.exam_date?.value || dbPaper?.exam_date || null,
+      question_paper: {
+        id: qp.file_id,
+        name: qp.name,
+        url: qp.web_view_link || `https://drive.google.com/file/d/${qp.file_id}/view`,
+        checksum: qpMeta.drive_checksum || null,
+        modifiedTime: qpMeta.drive_modified_time || null,
+        size: qp.size || null,
+      },
+      answer_key: null,
+      status: status,
+      error: qp.error || bestAk?.error || null,
+    };
+
+    // Attach answer key details (either from current batch match or existing DB paper)
     if (bestAk) {
       usedAkIds.add(bestAk.id);
-      matchedPapers.push({
-        subject: qp.metadata.subject?.value || bestAk.metadata.subject?.value || "Unknown Subject",
-        subject_code: qp.metadata.subject_code?.value || bestAk.metadata.subject_code?.value || null,
-        department: qp.metadata.department?.value || bestAk.metadata.department?.value || "Unknown",
-        semester: qp.metadata.semester?.value || bestAk.metadata.semester?.value || 1,
-        academic_year: qp.metadata.academic_year?.value || bestAk.metadata.academic_year?.value || "2024-25",
-        exam_type: qp.metadata.exam_type?.value || bestAk.metadata.exam_type?.value || "ESE",
-        marks: qp.metadata.marks?.value || bestAk.metadata.marks?.value || 70,
-        exam_date: qp.metadata.exam_date?.value || bestAk.metadata.exam_date?.value || null,
-        question_paper: {
-          id: qp.file_id,
-          name: qp.name,
-          url: qp.web_view_link || `https://drive.google.com/file/d/${qp.file_id}/view`,
-        },
-        answer_key: {
-          id: bestAk.file_id,
-          name: bestAk.name,
-          url: bestAk.web_view_link || `https://drive.google.com/file/d/${bestAk.file_id}/view`,
-        },
-        status: "Ready",
-        error: qp.error || bestAk.error || null,
-      });
-    } else {
-      matchedPapers.push({
-        subject: qp.metadata.subject?.value || "Unknown Subject",
-        subject_code: qp.metadata.subject_code?.value || null,
-        department: qp.metadata.department?.value || "Unknown",
-        semester: qp.metadata.semester?.value || 1,
-        academic_year: qp.metadata.academic_year?.value || "2024-25",
-        exam_type: qp.metadata.exam_type?.value || "ESE",
-        marks: qp.metadata.marks?.value || 70,
-        exam_date: qp.metadata.exam_date?.value || null,
-        question_paper: {
-          id: qp.file_id,
-          name: qp.name,
-          url: qp.web_view_link || `https://drive.google.com/file/d/${qp.file_id}/view`,
-        },
-        answer_key: null,
-        status: "Missing Answer Key",
-        error: qp.error || null,
-      });
+      matchRecord.answer_key = {
+        id: bestAk.file_id,
+        name: bestAk.name,
+        url: bestAk.web_view_link || `https://drive.google.com/file/d/${bestAk.file_id}/view`,
+        checksum: bestAk.metadata?.drive_checksum || null,
+        modifiedTime: bestAk.metadata?.drive_modified_time || null,
+        size: bestAk.size || null,
+      };
+    } else if (dbPaper && dbPaper.answer_key_url) {
+      // Carry over existing AK
+      matchRecord.answer_key = {
+        id: dbPaper.answer_key_file_id || null,
+        name: dbPaper.answer_key_name || "Answer Key",
+        url: dbPaper.answer_key_url,
+        checksum: dbPaper.answer_key_checksum || null,
+        modifiedTime: dbPaper.answer_key_modified_time || null,
+        size: dbPaper.answer_key_size || null,
+      };
     }
+
+    if (isUpdate && dbPaper) {
+      matchRecord.dbPaperId = dbPaper.id;
+      // Compare checksums to determine if we actually update
+      const isQpIdentical = dbPaper.question_paper_checksum === qpMeta.drive_checksum;
+      const isAkIdentical = bestAk 
+        ? dbPaper.answer_key_checksum === bestAk.metadata?.drive_checksum
+        : true; // no new AK to update
+        
+      if (isQpIdentical && isAkIdentical) {
+        matchRecord.status = "Duplicate";
+        matchRecord.duplicateResolution = "skip";
+      } else {
+        matchRecord.status = "Update Question Paper";
+        matchRecord.duplicateResolution = "update";
+      }
+    } else {
+      if (!matchRecord.answer_key) {
+        matchRecord.status = needsReview ? "Needs Review" : "Missing Answer Key";
+      }
+    }
+
+    matchedPapers.push(matchRecord);
   }
 
-  // Remaining Answer Keys
+  // Process remaining Answer Keys (those not matched with QPs in the current batch)
   for (const ak of aks) {
     if (usedAkIds.has(ak.id)) continue;
-    matchedPapers.push({
-      subject: ak.metadata.subject?.value || "Unknown Subject",
-      subject_code: ak.metadata.subject_code?.value || null,
-      department: ak.metadata.department?.value || "Unknown",
-      semester: ak.metadata.semester?.value || 1,
-      academic_year: ak.metadata.academic_year?.value || "2024-25",
-      exam_type: ak.metadata.exam_type?.value || "ESE",
-      marks: ak.metadata.marks?.value || 70,
-      exam_date: ak.metadata.exam_date?.value || null,
+    const akMeta = ak.metadata;
+    let isUpdate = akMeta.isUpdate === true;
+    let existingPaperId = akMeta.existingPaperId || null;
+    let dbPaper = existingPaperId ? dbPapers.find(p => p.id === existingPaperId) : null;
+
+    if (!dbPaper) {
+      dbPaper = findDbPaperByMeta(akMeta);
+    }
+
+    const needsReview =
+      akMeta._needs_review === true ||
+      !akMeta.subject?.value ||
+      akMeta.subject?.value === "Unknown Subject";
+
+    const matchRecord: any = {
+      subject: akMeta.subject?.value || dbPaper?.subject || "Unknown Subject",
+      subject_code: akMeta.subject_code?.value || dbPaper?.subject_code || null,
+      department: akMeta.department?.value || dbPaper?.department || "Unknown",
+      semester: akMeta.semester?.value || dbPaper?.semester || 1,
+      academic_year: akMeta.academic_year?.value || dbPaper?.academic_year || "2024-25",
+      exam_type: akMeta.exam_type?.value || dbPaper?.exam_type || "ESE",
+      marks: akMeta.marks?.value || dbPaper?.marks || 70,
+      exam_date: akMeta.exam_date?.value || dbPaper?.exam_date || null,
       question_paper: null,
       answer_key: {
         id: ak.file_id,
         name: ak.name,
         url: ak.web_view_link || `https://drive.google.com/file/d/${ak.file_id}/view`,
+        checksum: akMeta.drive_checksum || null,
+        modifiedTime: akMeta.drive_modified_time || null,
+        size: ak.size || null,
       },
-      status: "Unknown Subject",
+      status: needsReview ? "Needs Review" : "Unknown Subject",
       error: ak.error || null,
-    });
+    };
+
+    if (dbPaper) {
+      matchRecord.dbPaperId = dbPaper.id;
+      // Carry over existing QP
+      matchRecord.question_paper = {
+        id: dbPaper.question_paper_file_id || null,
+        name: dbPaper.question_paper_name || "Question Paper",
+        url: dbPaper.question_paper_url,
+        checksum: dbPaper.question_paper_checksum || null,
+        modifiedTime: dbPaper.question_paper_modified_time || null,
+        size: dbPaper.question_paper_size || null,
+      };
+
+      if (!dbPaper.answer_key_url) {
+        matchRecord.status = "Attach Answer Key";
+        matchRecord.duplicateResolution = "update";
+      } else {
+        // Compare checksums to see if we update/replace answer key
+        const isAkIdentical = dbPaper.answer_key_checksum === akMeta.drive_checksum;
+        if (isAkIdentical) {
+          matchRecord.status = "Duplicate";
+          matchRecord.duplicateResolution = "skip";
+        } else {
+          matchRecord.status = "Replace Wrong Answer Key";
+          matchRecord.duplicateResolution = "update";
+        }
+      }
+    }
+
+    matchedPapers.push(matchRecord);
   }
 
-  // Unknowns
+  // Process Unknowns
   for (const un of unknowns) {
     matchedPapers.push({
-      subject: un.metadata.subject?.value || "Unknown Subject",
-      subject_code: un.metadata.subject_code?.value || null,
-      department: un.metadata.department?.value || "Unknown",
-      semester: un.metadata.semester?.value || 1,
-      academic_year: un.metadata.academic_year?.value || "2024-25",
-      exam_type: un.metadata.exam_type?.value || "ESE",
-      marks: un.metadata.marks?.value || 70,
-      exam_date: un.metadata.exam_date?.value || null,
+      subject: un.metadata?.subject?.value || "Unknown Subject",
+      subject_code: un.metadata?.subject_code?.value || null,
+      department: un.metadata?.department?.value || "Unknown",
+      semester: un.metadata?.semester?.value || 1,
+      academic_year: un.metadata?.academic_year?.value || "2024-25",
+      exam_type: un.metadata?.exam_type?.value || "ESE",
+      marks: un.metadata?.marks?.value || 70,
+      exam_date: un.metadata?.exam_date?.value || null,
       question_paper: {
         id: un.file_id,
         name: un.name,
         url: un.web_view_link || `https://drive.google.com/file/d/${un.file_id}/view`,
+        checksum: un.metadata?.drive_checksum || null,
+        modifiedTime: un.metadata?.drive_modified_time || null,
+        size: un.size || null,
       },
       answer_key: null,
-      status: "Unknown Subject",
+      status: "Needs Review",
       error: un.error || null,
     });
   }
 
-  // Duplicate detection
-  const { data: dbPapers } = await supabaseAdmin
-    .from("papers")
-    .select("id, subject, department, semester, academic_year, exam_type");
-
-  const normalizeString = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-
-  if (dbPapers) {
-    for (const item of matchedPapers) {
-      const duplicate = dbPapers.find(
-        (p) =>
-          normalizeString(p.subject) === normalizeString(item.subject) &&
-          normalizeString(p.department) === normalizeString(item.department) &&
-          p.semester === item.semester &&
-          normalizeString(p.academic_year) === normalizeString(item.academic_year) &&
-          normalizeString(p.exam_type) === normalizeString(item.exam_type)
-      );
-
-      if (duplicate) {
-        item.status = "Duplicate";
-        item.dbPaperId = duplicate.id;
-        item.duplicateResolution = "skip";
-      }
-    }
-  }
+  // Stats calculation
+  const totalDriveFiles = items.length;
+  const alreadyImportedCount = skippedItems.filter(r => r.metadata?.skipReason === "already_imported").length;
 
   const stats = {
-    totalFiles: items.length,
+    totalFiles: totalDriveFiles,
+    alreadyImported: alreadyImportedCount,
     questionPapers: qps.length,
     answerKeys: aks.length,
-    matchedPapers: matchedPapers.filter((p) => p.question_paper && p.answer_key).length,
+    matchedPapers: matchedPapers.filter((p) => p.question_paper && p.answer_key && p.status !== "Duplicate").length,
     missingAnswerKeys: matchedPapers.filter((p) => p.question_paper && !p.answer_key).length,
     duplicates: matchedPapers.filter((p) => p.status === "Duplicate").length,
     unknownFiles: unknowns.length,
+    skippedFiles: skippedItems.length,
+    needsReview: matchedPapers.filter((p) => p.status === "Needs Review").length,
   };
 
-  // Update bulk_import_jobs
+  // Update bulk_import_jobs with results
   await supabaseAdmin
     .from("bulk_import_jobs")
     .update({
@@ -812,9 +1072,80 @@ router.post(
             return;
           }
 
+          // Fetch existing files by ID to identify duplicates/updates/skipped
+          const fileIds = files.map((f) => f.id);
+          const dbPapersMap = await fetchExistingPapersForFiles(fileIds);
+
           // Pre-classify files and bulk insert items into database
           const itemsToInsert = files.map((file) => {
             const preClassification = classifyFile(file.name, file.path, "");
+            const isAcademic = preClassification === "Question Paper" || preClassification === "Answer Key";
+            
+            if (!isAcademic) {
+              return {
+                job_id: job.id,
+                file_id: file.id,
+                name: file.name,
+                path: file.path,
+                size: file.size || null,
+                web_view_link: file.webViewLink || null,
+                status: "skipped",
+                type: preClassification,
+                metadata: { skipReason: "non_academic" },
+              };
+            }
+
+            const existing = dbPapersMap.get(file.id);
+            if (existing) {
+              const isQp = existing.role === "qp";
+              const storedChecksum = isQp ? existing.paper.question_paper_checksum : existing.paper.answer_key_checksum;
+              const storedSize = isQp ? existing.paper.question_paper_size : existing.paper.answer_key_size;
+              const storedModTime = isQp ? existing.paper.question_paper_modified_time : existing.paper.answer_key_modified_time;
+
+              const isIdentical =
+                storedChecksum === file.md5Checksum &&
+                (storedSize === null || Number(storedSize) === file.size) &&
+                (storedModTime === null || new Date(storedModTime).getTime() === new Date(file.modifiedTime || "").getTime());
+
+              if (isIdentical) {
+                return {
+                  job_id: job.id,
+                  file_id: file.id,
+                  name: file.name,
+                  path: file.path,
+                  size: file.size || null,
+                  web_view_link: file.webViewLink || null,
+                  status: "skipped",
+                  type: preClassification,
+                  metadata: {
+                    skipReason: "already_imported",
+                    existingPaperId: existing.paper.id,
+                    drive_modified_time: file.modifiedTime || null,
+                    drive_checksum: file.md5Checksum || null,
+                  },
+                };
+              } else {
+                return {
+                  job_id: job.id,
+                  file_id: file.id,
+                  name: file.name,
+                  path: file.path,
+                  size: file.size || null,
+                  web_view_link: file.webViewLink || null,
+                  status: "pending",
+                  type: preClassification,
+                  metadata: {
+                    isUpdate: true,
+                    existingPaperId: existing.paper.id,
+                    role: existing.role,
+                    drive_modified_time: file.modifiedTime || null,
+                    drive_checksum: file.md5Checksum || null,
+                  },
+                };
+              }
+            }
+
+            // Brand new file
             return {
               job_id: job.id,
               file_id: file.id,
@@ -824,7 +1155,10 @@ router.post(
               web_view_link: file.webViewLink || null,
               status: "pending",
               type: preClassification,
-              metadata: {},
+              metadata: {
+                drive_modified_time: file.modifiedTime || null,
+                drive_checksum: file.md5Checksum || null,
+              },
             };
           });
 
@@ -837,14 +1171,17 @@ router.post(
           }
 
           // Complete Phase 1 scan. Status transitions to paused (awaiting extraction click)
+          const skippedTypes = ["Timetable", "Notice", "Circular", "Syllabus", "Unknown"];
           const stats = {
             totalFiles: files.length,
+            alreadyImported: itemsToInsert.filter((r) => r.metadata.skipReason === "already_imported").length,
             questionPapers: itemsToInsert.filter((r) => r.type === "Question Paper").length,
             answerKeys: itemsToInsert.filter((r) => r.type === "Answer Key").length,
             matchedPapers: 0,
             missingAnswerKeys: 0,
             duplicates: 0,
             unknownFiles: itemsToInsert.filter((r) => r.type === "Unknown").length,
+            skippedFiles: itemsToInsert.filter((r) => r.status === "skipped").length,
           };
 
           await supabaseAdmin
@@ -1136,23 +1473,38 @@ router.post(
       let importedCount = 0;
       let failedCount = 0;
       let skippedCount = 0;
+      let newQpsCount = 0;
+      let newAksCount = 0;
+      let updatedQpsCount = 0;
+      let updatedAksCount = 0;
+      let duplicateSkippedCount = 0;
+      let needsReviewCount = 0;
 
       for (const item of papers) {
         try {
-          if (item.status === "Duplicate") {
-            const resolution = item.duplicateResolution || "skip";
+          // Determine if we update or insert a new paper
+          const isDuplicate = item.status === "Duplicate";
+          const hasExisting = !!item.dbPaperId;
+          const resolution = item.duplicateResolution || "skip";
 
-            if (resolution === "skip") {
-              skippedCount++;
-              continue;
-            }
+          if (isDuplicate && resolution === "skip") {
+            skippedCount++;
+            duplicateSkippedCount++;
+            continue;
+          }
 
-            if (resolution === "replace" && item.dbPaperId) {
-              // Delete old paper
+          if (item.status === "Needs Review") {
+            needsReviewCount++;
+          }
+
+          if (hasExisting) {
+            if (resolution === "replace") {
+              // Delete old paper record
               const { error: delErr } = await supabaseAdmin.from("papers").delete().eq("id", item.dbPaperId);
               if (delErr) throw delErr;
-            } else if (resolution === "update" && item.dbPaperId) {
-              // Update existing record
+              // Will proceed to insert new record below
+            } else {
+              // Perform update on existing record (resolution === "update" or status update/replace/attach)
               const updates: any = {
                 subject: item.subject,
                 subject_code: item.subject_code,
@@ -1165,31 +1517,54 @@ router.post(
                 updated_at: new Date().toISOString(),
               };
 
-              if (item.question_paper?.url) {
+              if (item.question_paper) {
                 updates.question_paper_source = "gdrive";
                 updates.question_paper_url = item.question_paper.url;
+                updates.question_paper_file_id = item.question_paper.id;
+                updates.question_paper_checksum = item.question_paper.checksum;
+                updates.question_paper_modified_time = item.question_paper.modifiedTime;
+                updates.question_paper_size = item.question_paper.size;
               }
-              if (item.answer_key?.url) {
+              if (item.answer_key) {
                 updates.answer_key_source = "gdrive";
                 updates.answer_key_url = item.answer_key.url;
+                updates.answer_key_file_id = item.answer_key.id;
+                updates.answer_key_checksum = item.answer_key.checksum;
+                updates.answer_key_modified_time = item.answer_key.modifiedTime;
+                updates.answer_key_size = item.answer_key.size;
               }
 
               const { error: updErr } = await supabaseAdmin.from("papers").update(updates).eq("id", item.dbPaperId);
               if (updErr) throw updErr;
+
+              if (item.status === "Update Question Paper") {
+                updatedQpsCount++;
+              } else if (
+                item.status === "Update Answer Key" ||
+                item.status === "Replace Wrong Answer Key" ||
+                item.status === "Attach Answer Key"
+              ) {
+                updatedAksCount++;
+              } else {
+                updatedQpsCount++;
+              }
+
+              // Dynamically learn subject aliases
+              await learnAliasesFromImport(item);
 
               importedCount++;
               continue;
             }
           }
 
-          // If skipping (either skipped duplicate or unpaired answer key with no QP URL)
+          // If brand new insert, must have at least a QP url
           if (!item.question_paper?.url) {
             skippedCount++;
             continue;
           }
 
-          // Insert new record
-          const { error: insErr } = await supabaseAdmin.from("papers").insert({
+          // Insert new paper record
+          const insertPayload: any = {
             subject: item.subject,
             subject_code: item.subject_code,
             department: item.department,
@@ -1200,11 +1575,32 @@ router.post(
             exam_date: item.exam_date || null,
             question_paper_source: "gdrive",
             question_paper_url: item.question_paper.url,
-            answer_key_source: item.answer_key?.url ? "gdrive" : null,
-            answer_key_url: item.answer_key?.url || null,
-          });
+            question_paper_file_id: item.question_paper.id,
+            question_paper_checksum: item.question_paper.checksum,
+            question_paper_modified_time: item.question_paper.modifiedTime,
+            question_paper_size: item.question_paper.size,
+          };
 
+          if (item.answer_key?.url) {
+            insertPayload.answer_key_source = "gdrive";
+            insertPayload.answer_key_url = item.answer_key.url;
+            insertPayload.answer_key_file_id = item.answer_key.id;
+            insertPayload.answer_key_checksum = item.answer_key.checksum;
+            insertPayload.answer_key_modified_time = item.answer_key.modifiedTime;
+            insertPayload.answer_key_size = item.answer_key.size;
+          }
+
+          const { error: insErr } = await supabaseAdmin.from("papers").insert(insertPayload);
           if (insErr) throw insErr;
+
+          newQpsCount++;
+          if (item.answer_key?.url) {
+            newAksCount++;
+          }
+
+          // Dynamically learn subject aliases
+          await learnAliasesFromImport(item);
+
           importedCount++;
         } catch (err) {
           console.error(`Failed to import paper for subject ${item.subject}:`, err);
@@ -1219,6 +1615,12 @@ router.post(
           imported: importedCount,
           skipped: skippedCount,
           failed: failedCount,
+          newQps: newQpsCount,
+          newAks: newAksCount,
+          updatedQps: updatedQpsCount,
+          updatedAks: updatedAksCount,
+          duplicateSkipped: duplicateSkippedCount,
+          needsReview: needsReviewCount,
         },
       });
     } catch (err) {
@@ -1227,5 +1629,28 @@ router.post(
     }
   }
 );
+
+async function learnAliasesFromImport(item: any) {
+  const supabaseAdmin = getSupabaseAdmin();
+  const filenames = [item.question_paper?.name, item.answer_key?.name].filter(Boolean);
+  const cleanSubject = item.subject;
+  if (!cleanSubject || cleanSubject === "Unknown Subject") return;
+
+  for (const filename of filenames) {
+    const words = filename.split(/[^a-zA-Z0-9\-]/);
+    for (const word of words) {
+      const upperWord = word.toUpperCase();
+      if (/^[A-Z\-]{2,6}$/.test(upperWord) && !["AK", "QP", "SEM", "PDF", "FMS"].includes(upperWord)) {
+        try {
+          await supabaseAdmin
+            .from("learned_aliases")
+            .upsert({ alias: upperWord, full_name: cleanSubject }, { onConflict: "alias" });
+        } catch (err) {
+          // ignore duplicate insert errors
+        }
+      }
+    }
+  }
+}
 
 export default router;

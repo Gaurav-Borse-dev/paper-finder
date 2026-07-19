@@ -32,7 +32,7 @@ interface ImportPaperItem {
     name: string;
     url: string;
   } | null;
-  status: "Ready" | "Missing Answer Key" | "Duplicate" | "Unknown Subject" | "Unknown Semester";
+  status: "Ready" | "Missing Answer Key" | "Duplicate" | "Unknown Subject" | "Unknown Semester" | "Needs Review" | "Update Question Paper" | "Attach Answer Key" | "Replace Wrong Answer Key";
   dbPaperId?: string;
   duplicateResolution?: "skip" | "replace" | "update";
   error?: string | null;
@@ -45,12 +45,15 @@ interface JobStatusResponse {
   progress: number;
   stats: {
     totalFiles: number;
+    alreadyImported?: number;
     questionPapers: number;
     answerKeys: number;
     matchedPapers: number;
     missingAnswerKeys: number;
     duplicates: number;
     unknownFiles: number;
+    skippedFiles?: number;
+    needsReview?: number;
   };
   results: ImportPaperItem[];
   items: Array<{
@@ -93,6 +96,7 @@ function BulkImport() {
   // Execution States
   const [isImporting, setIsImporting] = useState<boolean>(false);
   const [importReport, setImportReport] = useState<any | null>(null);
+  const [scanStartTime, setScanStartTime] = useState<number | null>(null);
 
   // Load GIS SDK
   useEffect(() => {
@@ -205,6 +209,7 @@ function BulkImport() {
     setScanStatus(null);
     setPapersList([]);
     setSelectedPaperIndices(new Set());
+    setScanStartTime(Date.now());
 
     try {
       const data = await apiFetch<{ jobId: string }>("/import/scan", {
@@ -293,7 +298,7 @@ function BulkImport() {
           // Select everything by default except duplicates
           const selected = new Set<number>();
           status.results.forEach((p, idx) => {
-            if (p.status !== "Duplicate" && p.status !== "Unknown Subject") {
+            if (p.status !== "Duplicate" && p.status !== "Unknown Subject" && p.status !== "Needs Review") {
               selected.add(idx);
             }
           });
@@ -333,7 +338,7 @@ function BulkImport() {
       const updatedItem = { ...copy[index], [key]: value };
 
       // Update status dynamically if relevant fields are fixed
-      if (updatedItem.status === "Unknown Subject" && key === "subject" && value !== "Unknown Subject") {
+      if ((updatedItem.status === "Unknown Subject" || updatedItem.status === "Needs Review") && key === "subject" && value !== "Unknown Subject") {
         updatedItem.status = updatedItem.answer_key ? "Ready" : "Missing Answer Key";
       }
 
@@ -559,7 +564,7 @@ function BulkImport() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-3 gap-4 text-center">
+                <div className="grid grid-cols-4 gap-4 text-center">
                   <div className="bg-slate-50 dark:bg-muted/20 rounded-2xl p-4 border border-border">
                     <span className="text-muted-foreground block text-[10px] font-bold uppercase tracking-wider">QUESTION PAPERS</span>
                     <span className="text-2xl font-extrabold block text-blue-600 dark:text-blue-400 mt-1">
@@ -576,6 +581,12 @@ function BulkImport() {
                     <span className="text-muted-foreground block text-[10px] font-bold uppercase tracking-wider">UNKNOWNS</span>
                     <span className="text-2xl font-extrabold block text-blue-600 dark:text-blue-400 mt-1">
                       {scanStatus.stats?.unknownFiles || 0}
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 dark:bg-muted/20 rounded-2xl p-4 border border-border">
+                    <span className="text-muted-foreground block text-[10px] font-bold uppercase tracking-wider">SKIPPED</span>
+                    <span className="text-2xl font-extrabold block text-slate-400 mt-1">
+                      {scanStatus.stats?.skippedFiles || 0}
                     </span>
                   </div>
                 </div>
@@ -972,6 +983,22 @@ function BulkImport() {
                             <span className="inline-flex rounded-full bg-orange-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-orange-600 border border-orange-500/20">
                               Unknown Subject
                             </span>
+                          ) : paper.status === "Needs Review" ? (
+                            <span className="inline-flex rounded-full bg-violet-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-violet-600 border border-violet-500/20 animate-pulse">
+                              Needs Review
+                            </span>
+                          ) : paper.status === "Update Question Paper" ? (
+                            <span className="inline-flex rounded-full bg-sky-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-sky-600 border border-sky-500/20">
+                              ↻ Update QP
+                            </span>
+                          ) : paper.status === "Attach Answer Key" ? (
+                            <span className="inline-flex rounded-full bg-teal-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-teal-600 border border-teal-500/20">
+                              + Attach AK
+                            </span>
+                          ) : paper.status === "Replace Wrong Answer Key" ? (
+                            <span className="inline-flex rounded-full bg-rose-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-rose-600 border border-rose-500/20">
+                              ↻ Replace AK
+                            </span>
                           ) : (
                             <span className="inline-flex rounded-full bg-green-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-green-600 border border-green-500/20">
                               Ready
@@ -1000,31 +1027,49 @@ function BulkImport() {
               </div>
             </div>
 
-            {/* Stats list */}
-            <div className="grid grid-cols-4 gap-4 my-6">
-              <div className="rounded-xl border border-border bg-background p-4 text-center">
-                <span className="text-[10px] text-muted-foreground block font-bold uppercase tracking-wider mb-1">
-                  Total Processed
-                </span>
-                <span className="text-2xl font-extrabold">{importReport.stats?.totalProcessed || 0}</span>
+            {/* Sync Report Dashboard */}
+            <div className="grid grid-cols-5 gap-3 my-6">
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-muted-foreground block font-bold uppercase tracking-wider mb-1">Total Processed</span>
+                <span className="text-xl font-extrabold">{importReport.stats?.totalProcessed || 0}</span>
               </div>
-              <div className="rounded-xl border border-border bg-background p-4 text-center">
-                <span className="text-[10px] text-green-600 block font-bold uppercase tracking-wider mb-1">
-                  Imported
-                </span>
-                <span className="text-2xl font-extrabold text-green-600">{importReport.stats?.imported || 0}</span>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-green-600 block font-bold uppercase tracking-wider mb-1">Imported</span>
+                <span className="text-xl font-extrabold text-green-600">{importReport.stats?.imported || 0}</span>
               </div>
-              <div className="rounded-xl border border-border bg-background p-4 text-center">
-                <span className="text-[10px] text-amber-600 block font-bold uppercase tracking-wider mb-1">
-                  Skipped
-                </span>
-                <span className="text-2xl font-extrabold text-amber-600">{importReport.stats?.skipped || 0}</span>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-blue-600 block font-bold uppercase tracking-wider mb-1">New QPs</span>
+                <span className="text-xl font-extrabold text-blue-600">{importReport.stats?.newQps || 0}</span>
               </div>
-              <div className="rounded-xl border border-border bg-background p-4 text-center">
-                <span className="text-[10px] text-red-600 block font-bold uppercase tracking-wider mb-1">
-                  Failed
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-blue-500 block font-bold uppercase tracking-wider mb-1">New AKs</span>
+                <span className="text-xl font-extrabold text-blue-500">{importReport.stats?.newAks || 0}</span>
+              </div>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-sky-600 block font-bold uppercase tracking-wider mb-1">Updated QPs</span>
+                <span className="text-xl font-extrabold text-sky-600">{importReport.stats?.updatedQps || 0}</span>
+              </div>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-teal-600 block font-bold uppercase tracking-wider mb-1">Updated AKs</span>
+                <span className="text-xl font-extrabold text-teal-600">{importReport.stats?.updatedAks || 0}</span>
+              </div>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-amber-600 block font-bold uppercase tracking-wider mb-1">Skipped</span>
+                <span className="text-xl font-extrabold text-amber-600">{importReport.stats?.skipped || 0}</span>
+              </div>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-orange-600 block font-bold uppercase tracking-wider mb-1">Duplicates</span>
+                <span className="text-xl font-extrabold text-orange-600">{importReport.stats?.duplicateSkipped || 0}</span>
+              </div>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-red-600 block font-bold uppercase tracking-wider mb-1">Failed</span>
+                <span className="text-xl font-extrabold text-red-600">{importReport.stats?.failed || 0}</span>
+              </div>
+              <div className="rounded-xl border border-border bg-background p-3 text-center">
+                <span className="text-[9px] text-muted-foreground block font-bold uppercase tracking-wider mb-1">Runtime</span>
+                <span className="text-xl font-extrabold">
+                  {scanStartTime ? (() => { const ms = Date.now() - scanStartTime; return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`; })() : "—"}
                 </span>
-                <span className="text-2xl font-extrabold text-red-600">{importReport.stats?.failed || 0}</span>
               </div>
             </div>
 
