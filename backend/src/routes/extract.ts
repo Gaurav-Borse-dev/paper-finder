@@ -535,14 +535,14 @@ export const SUBJECTS_ALIASES: Record<string, string> = {
 };
 
 const DEPT_ABBRS: Record<string, string[]> = {
-  "Computer Engineering": ["cse", "computer engineering", "comp eng", "comp. eng.", "comp"],
-  "Information Technology": ["it", "information technology", "infotech"],
-  "Mechanical Engineering": ["mech", "mechanical", "mechanical engineering", "mech eng", "mech. eng."],
-  "Civil Engineering": ["civil", "civil engineering"],
-  "Electrical Engineering": ["electrical", "electrical engineering", "elect"],
-  "Electronics and Telecommunication": ["entc", "e&tc", "etc", "et&c", "electronics", "telecommunication"],
-  "Artificial Intelligence and Machine Learning": ["aiml", "ai & ml", "ai/ml", "artificial intelligence"],
-  "Data Science": ["aids", "data science", "cseds", "ds"],
+  "Computer Engineering": ["cse", "computer engineering", "comp eng", "comp. eng.", "comp engg", "comp. engg.", "computer", "computer sci", "computer science"],
+  "Information Technology": ["it", "information technology", "infotech", "info tech"],
+  "Mechanical Engineering": ["mech", "mechanical", "mechanical engineering", "mech eng", "mech. eng.", "mech engg", "me"],
+  "Civil Engineering": ["civil", "civil engineering", "ce", "civil eng", "civil engg"],
+  "Electrical Engineering": ["electrical", "electrical engineering", "elect", "ee", "elect eng", "elect engg", "elect. eng."],
+  "Electronics and Telecommunication": ["entc", "e&tc", "etc", "et&c", "electronics", "telecommunication", "ece", "extc", "e & tc"],
+  "Artificial Intelligence and Machine Learning": ["aiml", "ai & ml", "ai/ml", "artificial intelligence", "ai and ml"],
+  "Data Science": ["aids", "data science", "cseds", "ds", "ai & ds", "ai&ds"],
 };
 
 function getLevenshteinDistance(a: string, b: string): number {
@@ -643,20 +643,55 @@ function matchDepartment(str: string): string | null {
 }
 
 function matchSemester(str: string): number | null {
-  const semNumRegex = /\b(?:semester|sem)\s*[:\-]?\s*([1-8])\b/i;
-  const semRomanRegex = /\b(?:semester|sem)\s*[:\-]?\s*(I|II|III|IV|V|VI|VII|VIII)\b/i;
   const romanMap: Record<string, number> = {
     I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8
   };
+  const ordinalMap: Record<string, number> = {
+    first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8,
+    "1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5, "6th": 6, "7th": 7, "8th": 8,
+  };
 
+  // Pattern 1: Sem 3, Semester: 5, SEM-III, SEM – 3, S-III
+  const semNumRegex = /\b(?:semester|sem)\s*[:\-–]?\s*([1-8])\b/i;
   const numMatch = str.match(semNumRegex);
   if (numMatch) {
     return parseInt(numMatch[1], 10);
   }
+
+  const semRomanRegex = /\b(?:semester|sem)\s*[:\-–]?\s*(VIII|VII|VI|IV|V|III|II|I)\b/i;
   const romanMatch = str.match(semRomanRegex);
   if (romanMatch) {
     return romanMap[romanMatch[1].toUpperCase()] || null;
   }
+
+  // Pattern 2: "Third Semester", "3rd Semester", "1st Sem"
+  const ordinalSemRegex = /\b(first|second|third|fourth|fifth|sixth|seventh|eighth|1st|2nd|3rd|4th|5th|6th|7th|8th)\s+(?:semester|sem)\b/i;
+  const ordinalMatch = str.match(ordinalSemRegex);
+  if (ordinalMatch) {
+    return ordinalMap[ordinalMatch[1].toLowerCase()] || null;
+  }
+
+  // Pattern 3: Year prefix to semester range (use ODD/EVEN to pick exact semester)
+  const isOdd = /\bODD\b/i.test(str);
+  const isEven = /\bEVEN\b/i.test(str);
+
+  // FY / F.Y. / First Year / FY B.Tech → Sem 1 (ODD) or 2 (EVEN)
+  if (/\b(?:FY|F\.?\s?Y\.?|first\s*year|fy\s*b\.?\s*tech)\b/i.test(str)) {
+    return isEven ? 2 : 1;
+  }
+  // SY / S.Y. / S.E. / Second Year → Sem 3 (ODD) or 4 (EVEN)
+  if (/\b(?:SY|S\.?\s?Y\.?|S\.?\s?E\.?|second\s*year|sy\s*b\.?\s*tech)\b/i.test(str)) {
+    return isEven ? 4 : 3;
+  }
+  // TY / T.Y. / T.E. / Third Year → Sem 5 (ODD) or 6 (EVEN)
+  if (/\b(?:TY|T\.?\s?Y\.?|T\.?\s?E\.?|third\s*year|ty\s*b\.?\s*tech)\b/i.test(str)) {
+    return isEven ? 6 : 5;
+  }
+  // BE / B.E. / Final Year / Final → Sem 7 (ODD) or 8 (EVEN)
+  if (/\b(?:BE|B\.?\s?E\.?|final\s*year|final|be\s*b\.?\s*tech)\b/i.test(str)) {
+    return isEven ? 8 : 7;
+  }
+
   return null;
 }
 
@@ -691,14 +726,25 @@ function matchExamType(str: string): "ESE" | "RE-ESE" | "Supplementary" | "Compl
 }
 
 function matchMarks(str: string): number | null {
-  const marksRegex = /\b(?:max\w*\s+marks|maximum\s+marks|marks)\s*[:\-]?\s*(\d{2,3})\b/i;
-  const match = str.match(marksRegex);
-  if (match) {
-    return parseInt(match[1], 10);
-  }
-  const genericMatch = str.match(/\b(50|60|65|70|75|80|100)\b/);
-  if (genericMatch) {
-    return parseInt(genericMatch[1], 10);
+  // Only match marks when preceded by marks-related keywords — never match bare numbers
+  const marksPatterns = [
+    /\b(?:max\.?\s*marks|maximum\s+marks|total\s+marks|full\s+marks)\s*[:\-–]?\s*(\d{2,3})\b/i,
+    /\bmarks\s*[:\-–]?\s*(\d{2,3})\b/i,
+    /\b(\d{2,3})\s*(?:marks|m(?:arks)?)\b/i,
+  ];
+  for (const regex of marksPatterns) {
+    const match = str.match(regex);
+    if (match) {
+      const val = parseInt(match[1], 10);
+      // Validate: marks are typically 50, 60, 65, 70, 75, 80, or 100
+      if ([50, 60, 65, 70, 75, 80, 100].includes(val)) {
+        return val;
+      }
+      // Accept other 2-3 digit values if explicitly preceded by "marks"
+      if (val >= 20 && val <= 200) {
+        return val;
+      }
+    }
   }
   return null;
 }
@@ -886,7 +932,7 @@ export async function localExtract(text: string, filename?: string, folderPath?:
         const dName = d.name.toLowerCase().trim();
         if (textToScan.toLowerCase().includes(dName)) {
           matchedDept = d.name;
-          textResult.department = { value: d.name, confidence: 0.70 };
+          textResult.department = { value: d.name, confidence: 0.95 }; // Exact DB full-name match in PDF text
           break;
         }
       }
@@ -899,7 +945,7 @@ export async function localExtract(text: string, filename?: string, folderPath?:
               const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
               if (regex.test(textToScan)) {
                 matchedDept = d.name;
-                textResult.department = { value: d.name, confidence: 0.70 };
+                textResult.department = { value: d.name, confidence: 0.85 }; // Abbreviation match in PDF text
                 break;
               }
             }
@@ -912,47 +958,37 @@ export async function localExtract(text: string, filename?: string, folderPath?:
     console.error("Local dept query failed:", e);
   }
 
-  // -- Semester --
-  const semNumMatch = normalizedText.match(/\b(?:semester|sem)\s*[:\-]?\s*([1-8])\b/i);
-  const semRomanMatch = normalizedText.match(/\b(?:semester|sem)\s*[:\-]?\s*(I|II|III|IV|V|VI|VII|VIII)\b/i);
-  const romanMap: Record<string, number> = {
-    I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8
-  };
-
-  if (semNumMatch) {
-    textResult.semester = { value: parseInt(semNumMatch[1], 10), confidence: 0.70 };
-  } else if (semRomanMatch) {
-    const romanVal = semRomanMatch[1].toUpperCase();
-    if (romanMap[romanVal]) {
-      textResult.semester = { value: romanMap[romanVal], confidence: 0.70 };
-    }
+  // -- Semester -- (use the improved matchSemester function)
+  const matchedSemFromText = matchSemester(normalizedText);
+  if (matchedSemFromText) {
+    textResult.semester = { value: matchedSemFromText, confidence: 0.90 };
   }
 
   // -- Academic Year --
   const yearMatch = normalizedText.match(/\b(20\d{2})\s*-\s*(20)?(\d{2})\b/);
   if (yearMatch) {
-    textResult.academic_year = { value: `${yearMatch[1]}-${yearMatch[3]}`, confidence: 0.70 };
+    textResult.academic_year = { value: `${yearMatch[1]}-${yearMatch[3]}`, confidence: 0.90 };
   }
 
   // -- Exam Type --
   const examTypePatterns = [
-    { type: "RE-ESE" as const, regex: /\b(?:re\s*-\s*ese|re\s*ese|re\s*-\s*exam|re\s*exam|\\bre\\b)\b/i },
+    { type: "RE-ESE" as const, regex: /\b(?:re\s*[\-–]?\s*ese|re\s*[\-–]?\s*exam|re\s*[\-–]?\s*end\s*semester)\b/i },
     { type: "ESE" as const, regex: /\b(?:ese|end\s*semester|regular\s*end\s*semester|regular\s*ese)\b/i },
     { type: "Supplementary" as const, regex: /\b(?:supplementary|supp)\b/i },
-    { type: "Complementary" as const, regex: /\b(?:complementary|comp)\b/i }
+    { type: "Complementary" as const, regex: /\b(?:complementary)\b/i }
   ];
 
   for (const et of examTypePatterns) {
     if (et.regex.test(normalizedText)) {
-      textResult.exam_type = { value: et.type, confidence: 0.70 };
+      textResult.exam_type = { value: et.type, confidence: 0.90 };
       break;
     }
   }
 
-  // -- Marks --
-  const marksMatch = normalizedText.match(/\b(?:max\w*\s+marks|maximum\s+marks|marks)\s*[:\-]?\s*(\d{2,3})\b/i);
-  if (marksMatch) {
-    textResult.marks = { value: parseInt(marksMatch[1], 10), confidence: 0.70 };
+  // -- Marks -- (use the improved matchMarks function)
+  const matchedMarksFromText = matchMarks(normalizedText);
+  if (matchedMarksFromText) {
+    textResult.marks = { value: matchedMarksFromText, confidence: 0.90 };
   }
 
   // -- Subject Code --
@@ -961,11 +997,11 @@ export async function localExtract(text: string, filename?: string, folderPath?:
 
   const explicitMatch = normalizedText.match(codeRegexExplicit);
   if (explicitMatch) {
-    textResult.subject_code = { value: explicitMatch[1].toUpperCase(), confidence: 0.70 };
+    textResult.subject_code = { value: explicitMatch[1].toUpperCase(), confidence: 0.90 };
   } else {
     const genericMatch = normalizedText.match(genericCodeRegex);
     if (genericMatch) {
-      textResult.subject_code = { value: genericMatch[1].replace(/\s+/g, "").toUpperCase(), confidence: 0.70 };
+      textResult.subject_code = { value: genericMatch[1].replace(/\s+/g, "").toUpperCase(), confidence: 0.80 };
     }
   }
 
@@ -1022,12 +1058,12 @@ export async function localExtract(text: string, filename?: string, folderPath?:
   }
 
   if (matchedDateStr) {
-    textResult.exam_date = { value: matchedDateStr, confidence: 0.70 };
+    textResult.exam_date = { value: matchedDateStr, confidence: 0.90 };
     if (matchedMonth) {
-      textResult.exam_month = { value: matchedMonth, confidence: 0.70 };
+      textResult.exam_month = { value: matchedMonth, confidence: 0.90 };
     }
     if (matchedYearVal) {
-      textResult.exam_year = { value: matchedYearVal, confidence: 0.70 };
+      textResult.exam_year = { value: matchedYearVal, confidence: 0.90 };
     }
   } else {
     const monthYearRegex = /\b([A-Za-z]+)\s+(20\d{2})\b/;
@@ -1037,8 +1073,8 @@ export async function localExtract(text: string, filename?: string, folderPath?:
       const monthCode = monthMap[monthName];
       if (monthCode) {
         const fullMonth = myMatch[1].charAt(0).toUpperCase() + myMatch[1].slice(1);
-        textResult.exam_month = { value: fullMonth, confidence: 0.70 };
-        textResult.exam_year = { value: parseInt(myMatch[2], 10), confidence: 0.70 };
+        textResult.exam_month = { value: fullMonth, confidence: 0.85 };
+        textResult.exam_year = { value: parseInt(myMatch[2], 10), confidence: 0.85 };
       }
     }
   }
@@ -1052,7 +1088,7 @@ export async function localExtract(text: string, filename?: string, folderPath?:
         const sName = s.name.toLowerCase().trim();
         if (textToScan.toLowerCase().includes(sName)) {
           matchedSubject = s.name;
-          textResult.subject = { value: s.name, confidence: 0.75 };
+          textResult.subject = { value: s.name, confidence: 0.95 }; // Exact DB subject name match in PDF text
           break;
         }
       }
@@ -1063,10 +1099,10 @@ export async function localExtract(text: string, filename?: string, folderPath?:
           const dbMatch = subjects.find(s => s.name.toLowerCase() === alias.toLowerCase());
           if (dbMatch) {
             matchedSubject = dbMatch.name;
-            textResult.subject = { value: dbMatch.name, confidence: 0.75 };
+            textResult.subject = { value: dbMatch.name, confidence: 0.90 }; // Alias matched to DB subject
           } else {
             matchedSubject = alias;
-            textResult.subject = { value: alias, confidence: 0.60 };
+            textResult.subject = { value: alias, confidence: 0.75 }; // Alias matched but not in DB
           }
         }
       }
@@ -1081,7 +1117,7 @@ export async function localExtract(text: string, filename?: string, folderPath?:
             .split(" ")
             .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
             .join(" ");
-          textResult.subject = { value: cleanedSub, confidence: 0.50 };
+          textResult.subject = { value: cleanedSub, confidence: 0.60 }; // Regex extraction from text
         }
       }
     }
