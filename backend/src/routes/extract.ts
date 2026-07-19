@@ -1213,14 +1213,8 @@ export async function ocrViaTesseract(pdfBuffer: Buffer): Promise<string> {
     console.log(`[OCR] Tesseract successfully extracted ${text.length} chars.`);
     return text;
   } catch (err: any) {
-    console.warn(`[OCR] Local Tesseract OCR failed, falling back to Gemini Vision:`, err.message || err);
-    try {
-      const pdfBase64 = pdfBuffer.toString("base64");
-      return await ocrViaGemini(pdfBase64);
-    } catch (fallbackErr) {
-      console.error("[OCR] Gemini Vision fallback failed too:", fallbackErr);
-      return "";
-    }
+    console.warn(`[OCR] Local Tesseract OCR failed:`, err.message || err);
+    return "";
   }
 }
 

@@ -366,7 +366,7 @@ async function listPdfFilesRecursively(
   return files;
 }
 
-// Background Queue Processor
+// Background Queue Processor — Production Optimized
 async function processQueue(jobId: string, googleAccessToken: string) {
   if (activeJobRunners.has(jobId)) return;
   activeJobRunners.add(jobId);
@@ -390,38 +390,103 @@ async function processQueue(jobId: string, googleAccessToken: string) {
       return;
     }
 
-    // Get current job progress to check if starting first-time vs resume
-    const { data: job } = await supabaseAdmin
-      .from("bulk_import_jobs")
-      .select("progress, current_step")
-      .eq("id", jobId)
-      .single();
+    // Get total items count (all statuses) for unified progress
+    const totalFilesQuery = await supabaseAdmin
+      .from("bulk_import_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId);
+    const totalFilesCount = totalFilesQuery.count || items.length;
 
-    const initialProgress = (job && job.current_step === "scan_completed") ? 10 : (job?.progress || 10);
+    // Get already-done count for accurate progress on resume
+    const doneQuery = await supabaseAdmin
+      .from("bulk_import_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId)
+      .in("status", ["completed", "failed", "skipped"]);
+    const alreadyDoneCount = doneQuery.count || 0;
 
     // Update job to processing
     await supabaseAdmin
       .from("bulk_import_jobs")
       .update({
         status: "processing",
-        current_step: "Extracting metadata from PDFs...",
-        progress: initialProgress,
+        current_step: `Extracting metadata from PDFs...`,
+        progress: Math.min(Math.round(10 + (alreadyDoneCount / totalFilesCount) * 75), 85),
+        stats: {
+          processed: alreadyDoneCount,
+          total: totalFilesCount,
+          pending: items.length,
+        },
         updated_at: new Date().toISOString(),
       })
       .eq("id", jobId);
 
-    // Controlled Queue setup
+    // ===== Optimized Queue Setup =====
     const pendingQueue = [...items];
-    const totalFilesQuery = await supabaseAdmin
-      .from("bulk_import_items")
-      .select("id", { count: "exact", head: true })
-      .eq("job_id", jobId);
-
-    const totalFilesCount = totalFilesQuery.count || pendingQueue.length;
-    const concurrencyLimit = 2;
+    const concurrencyLimit = 5; // Up from 2
+    const geminiSemaphoreMax = 2; // Limit concurrent Gemini calls
+    let geminiActiveCount = 0;
     const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    // Exponential Backoff caller
+    // In-memory progress tracking (avoid per-item DB queries)
+    let processedCount = alreadyDoneCount;
+    let lastProgressUpdate = Date.now();
+    const PROGRESS_INTERVAL_MS = 5000; // Update DB every 5 seconds
+    const PROGRESS_BATCH_SIZE = 10; // Or every 10 items
+
+    // Shared job-status flag (polled every 5s instead of per-item)
+    let jobShouldStop = false;
+    const statusPollInterval = setInterval(async () => {
+      try {
+        const { data: jobStatus } = await supabaseAdmin
+          .from("bulk_import_jobs")
+          .select("status")
+          .eq("id", jobId)
+          .single();
+        if (!jobStatus || jobStatus.status === "paused" || jobStatus.status === "cancelled") {
+          jobShouldStop = true;
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    }, 5000);
+
+    // Helper to compute average confidence of core fields
+    const avgConfidence = (result: ExtractionResult): number => {
+      const coreFields: Array<keyof ExtractionResult> = ["subject", "department", "semester", "academic_year", "exam_type"];
+      let total = 0;
+      for (const f of coreFields) {
+        const val = result[f];
+        total += val ? val.confidence : 0;
+      }
+      return total / coreFields.length;
+    };
+
+    // Helper to flush progress to DB
+    const flushProgress = async (force = false) => {
+      const now = Date.now();
+      const itemsSinceLastUpdate = processedCount - alreadyDoneCount;
+      if (!force && itemsSinceLastUpdate % PROGRESS_BATCH_SIZE !== 0 && now - lastProgressUpdate < PROGRESS_INTERVAL_MS) {
+        return;
+      }
+      const progressPercent = Math.min(Math.round(10 + (processedCount / totalFilesCount) * 75), 85);
+      await supabaseAdmin
+        .from("bulk_import_jobs")
+        .update({
+          progress: progressPercent,
+          current_step: `Processed ${processedCount}/${totalFilesCount} files...`,
+          stats: {
+            processed: processedCount,
+            total: totalFilesCount,
+            pending: totalFilesCount - processedCount,
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+      lastProgressUpdate = now;
+    };
+
+    // Gemini retry with exponential backoff
     const callGeminiWithRetry = async (
       pdfBase64: string,
       fileName: string,
@@ -435,53 +500,33 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           return result;
         } catch (err: any) {
           const is429 = err?.message?.includes("429") || err?.message?.includes("quota");
-          if (is429) {
-            if (attempt < maxRetries - 1) {
-              console.log(`[Gemini] 429 Rate Limit. Retrying in ${delayMs}ms (Attempt ${attempt + 1}/${maxRetries})`);
-              await delay(delayMs);
-              delayMs *= 2;
-              continue;
-            } else {
-              // Rate limit fully hit after retries, trigger Phase 5: Auto-pause job for 60 seconds
-              console.log(`[Gemini] Rate limit fully exhausted. Pausing queue for 60 seconds...`);
-              await supabaseAdmin
-                .from("bulk_import_jobs")
-                .update({
-                  current_step: "Rate limit hit. Pausing extraction for 60 seconds before auto-resuming...",
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", jobId);
-
-              await delay(60000); // 60-second pause
-
-              // Update back to active step and retry one final time
-              await supabaseAdmin
-                .from("bulk_import_jobs")
-                .update({
-                  current_step: "Auto-resuming extraction...",
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", jobId);
-
-              return await extractMetadataViaGemini(pdfBase64, fileName, highConfFields);
-            }
+          if (is429 && attempt < maxRetries - 1) {
+            console.log(`[Gemini] 429 Rate Limit. Retrying in ${delayMs}ms (Attempt ${attempt + 1}/${maxRetries})`);
+            await delay(delayMs);
+            delayMs *= 2;
+            continue;
           }
           throw err;
         }
       }
     };
 
+    // Gemini semaphore acquire/release
+    const acquireGeminiSlot = async () => {
+      while (geminiActiveCount >= geminiSemaphoreMax) {
+        await delay(200);
+      }
+      geminiActiveCount++;
+    };
+    const releaseGeminiSlot = () => {
+      geminiActiveCount--;
+    };
+
     const worker = async () => {
       while (pendingQueue.length > 0) {
-        // Double-check job status to support Pause & Cancel
-        const { data: job, error: statusErr } = await supabaseAdmin
-          .from("bulk_import_jobs")
-          .select("status")
-          .eq("id", jobId)
-          .single();
-
-        if (statusErr || !job || job.status === "paused" || job.status === "cancelled") {
-          console.log(`[Worker] Worker stopping because job is ${job?.status || "undefined"}`);
+        // Check shared stop flag (no DB query per iteration)
+        if (jobShouldStop) {
+          console.log(`[Worker] Stopping — job flagged for pause/cancel`);
           break;
         }
 
@@ -495,44 +540,56 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           .eq("id", item.id);
 
         let localText = "";
-        let localResult: ExtractionResult | null = null;
+        let finalResult: ExtractionResult | null = null;
         let fileBuffer: Buffer | null = null;
         let extractionError = "";
         let usedAi = false;
+        let downloadSkipped = false;
 
         try {
-          // 1. Download
-          const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
-          const downloadRes = await fetch(downloadUrl, {
-            headers: { Authorization: `Bearer ${googleAccessToken}` },
-          });
-          if (!downloadRes.ok) {
-            throw new Error(`Download failed: ${downloadRes.statusText}`);
-          }
-          const arrayBuffer = await downloadRes.arrayBuffer();
-          fileBuffer = Buffer.from(arrayBuffer);
+          // ===== PHASE 1: Filename + Folder Extraction (NO download) =====
+          const filenameOnlyResult = await localExtract("", item.name, item.path);
+          const filenameConf = avgConfidence(filenameOnlyResult);
 
-          // 2. Parse text locally (first page only for speed)
-          const parser = new PDFParse({ data: fileBuffer });
-          const textData = await parser.getText({ first: 1 });
-          await parser.destroy();
-          localText = textData.text || "";
+          if (filenameConf >= 0.70) {
+            // Filename + folder context gave sufficient confidence — skip download entirely
+            finalResult = filenameOnlyResult;
+            downloadSkipped = true;
+            console.log(`[FastPath] ${item.name} — confidence ${(filenameConf * 100).toFixed(0)}% from filename/folder. Skipping download.`);
+          } else {
+            // ===== PHASE 2: Download + Text Extraction =====
+            const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
+            const downloadRes = await fetch(downloadUrl, {
+              headers: { Authorization: `Bearer ${googleAccessToken}` },
+            });
+            if (!downloadRes.ok) {
+              throw new Error(`Download failed: ${downloadRes.statusText}`);
+            }
+            const arrayBuffer = await downloadRes.arrayBuffer();
+            fileBuffer = Buffer.from(arrayBuffer);
 
-          // 3. Local extraction
-          localResult = await localExtract(localText, item.name, item.path);
+            // Parse text locally (first page only for speed)
+            const parser = new PDFParse({ data: fileBuffer });
+            const textData = await parser.getText({ first: 1 });
+            await parser.destroy();
+            localText = textData.text || "";
 
-          // 3b. Level 4 OCR fallback if text is extremely short (< 100 chars)
-          if (localText.trim().length < 100 && fileBuffer) {
-            console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
-            try {
-              const ocrText = await ocrViaTesseract(fileBuffer);
-              if (ocrText && ocrText.trim().length >= 50) {
-                console.log(`[OCR] Tesseract extracted ${ocrText.trim().length} chars for ${item.name}. Re-running local extraction.`);
-                localText = ocrText;
-                localResult = await localExtract(localText, item.name, item.path);
+            // Full local extraction with text + filename + folder path
+            finalResult = await localExtract(localText, item.name, item.path);
+
+            // Level 4 OCR fallback if text is extremely short (< 100 chars)
+            if (localText.trim().length < 100 && fileBuffer) {
+              console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
+              try {
+                const ocrText = await ocrViaTesseract(fileBuffer);
+                if (ocrText && ocrText.trim().length >= 50) {
+                  console.log(`[OCR] Tesseract extracted ${ocrText.trim().length} chars for ${item.name}. Re-running local extraction.`);
+                  localText = ocrText;
+                  finalResult = await localExtract(localText, item.name, item.path);
+                }
+              } catch (ocrErr) {
+                console.error(`Tesseract OCR failed for ${item.name}:`, ocrErr);
               }
-            } catch (ocrErr) {
-              console.error(`Tesseract OCR failed for ${item.name}:`, ocrErr);
             }
           }
         } catch (err: any) {
@@ -540,69 +597,64 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           extractionError = err instanceof Error ? err.message : String(err);
         }
 
-        let finalResult = localResult || {
-          subject: { value: null, confidence: 0 },
-          subject_code: { value: null, confidence: 0 },
-          department: { value: null, confidence: 0 },
-          semester: { value: null, confidence: 0 },
-          academic_year: { value: null, confidence: 0 },
-          exam_type: { value: null, confidence: 0 },
-          marks: { value: null, confidence: 0 },
-          exam_date: { value: null, confidence: 0 },
-          exam_month: { value: null, confidence: 0 },
-          exam_year: { value: null, confidence: 0 },
-        };
+        if (!finalResult) {
+          finalResult = {
+            subject: { value: null, confidence: 0 },
+            subject_code: { value: null, confidence: 0 },
+            department: { value: null, confidence: 0 },
+            semester: { value: null, confidence: 0 },
+            academic_year: { value: null, confidence: 0 },
+            exam_type: { value: null, confidence: 0 },
+            marks: { value: null, confidence: 0 },
+            exam_date: { value: null, confidence: 0 },
+            exam_month: { value: null, confidence: 0 },
+            exam_year: { value: null, confidence: 0 },
+          };
+        }
 
         const classification = classifyFile(item.name, item.path, localText);
 
-        // Phase 3: Smart Extraction Threshold
-        // Calculate average local confidence of core fields
-        const coreFields = ["subject", "department", "semester", "academic_year", "exam_type"];
-        let totalConf = 0;
-        coreFields.forEach((field) => {
-          const val = finalResult[field as keyof ExtractionResult];
-          totalConf += val ? val.confidence : 0;
-        });
-        const avgConf = totalConf / coreFields.length;
-
-        // Only call Gemini if confidence is below 70% (0.70)
-        const needsAiExtraction = avgConf < 0.70 && needsAi(finalResult);
+        // Compute average confidence for Gemini gating and metadata
+        const currentConf = avgConfidence(finalResult);
+        const needsAiExtraction = currentConf < 0.70 && needsAi(finalResult);
 
         // Mark low-confidence items for review
-        if (avgConf < 0.70) {
+        if (currentConf < 0.70) {
           (finalResult as any)._needs_review = true;
         }
 
+        // ===== PHASE 3: Gemini AI Extraction (only when truly needed) =====
         if (needsAiExtraction && fileBuffer) {
           const geminiApiKey = process.env.GEMINI_API_KEY;
           if (geminiApiKey) {
             try {
-              // Delay 1 second between jobs (staggered delay)
-              await delay(1000 + Math.random() * 500);
+              await acquireGeminiSlot();
+              try {
+                // Small delay between Gemini calls to respect rate limits
+                await delay(500);
 
-              const pdfBase64 = fileBuffer.toString("base64");
-              const highConfFields: any = {};
-              Object.keys(finalResult).forEach((key) => {
-                if (key.startsWith("_")) return; // skip internal flags
-                const field = finalResult[key as keyof ExtractionResult];
-                if (field && field.confidence >= 0.85) {
-                  highConfFields[key] = field.value;
-                }
-              });
-
-              const apiResult = await callGeminiWithRetry(pdfBase64, item.name, highConfFields);
-              if (apiResult) {
-                finalResult = mergeResults(finalResult, apiResult);
-                usedAi = true;
-                // Re-check confidence after AI merge
-                let newTotalConf = 0;
-                coreFields.forEach((field) => {
-                  const val = finalResult[field as keyof ExtractionResult];
-                  newTotalConf += val ? val.confidence : 0;
+                const pdfBase64 = fileBuffer.toString("base64");
+                const highConfFields: any = {};
+                Object.keys(finalResult).forEach((key) => {
+                  if (key.startsWith("_")) return;
+                  const field = finalResult![key as keyof ExtractionResult];
+                  if (field && field.confidence >= 0.85) {
+                    highConfFields[key] = field.value;
+                  }
                 });
-                if (newTotalConf / coreFields.length >= 0.70) {
-                  (finalResult as any)._needs_review = false;
+
+                const apiResult = await callGeminiWithRetry(pdfBase64, item.name, highConfFields);
+                if (apiResult) {
+                  finalResult = mergeResults(finalResult!, apiResult);
+                  usedAi = true;
+                  // Re-check confidence after AI merge
+                  const newConf = avgConfidence(finalResult!);
+                  if (newConf >= 0.70) {
+                    (finalResult as any)._needs_review = false;
+                  }
                 }
+              } finally {
+                releaseGeminiSlot();
               }
             } catch (geminiErr: any) {
               // NEVER fail the import because of Gemini errors
@@ -614,7 +666,6 @@ async function processQueue(jobId: string, googleAccessToken: string) {
                 console.error(`[Gemini] Unexpected error for ${item.name}:`, geminiErr);
               }
               (finalResult as any)._needs_review = true;
-              // DO NOT set extractionError — this is not a failure
             }
           } else {
             // No Gemini key configured — save with local data, mark for review
@@ -622,9 +673,15 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           }
         }
 
-        // Merge drive sync tracking metadata so we don't lose updates/checksums
+        // Pre-compute confidence percentage for the dashboard
+        const finalConf = avgConfidence(finalResult!);
+        const confidencePercent = Math.round(finalConf * 100);
+
+        // Merge drive sync tracking metadata
         const finalMetadata = {
           ...finalResult,
+          averageConfidence: confidencePercent,
+          downloadSkipped,
           isUpdate: item.metadata?.isUpdate || false,
           existingPaperId: item.metadata?.existingPaperId || null,
           role: item.metadata?.role || null,
@@ -645,33 +702,24 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           })
           .eq("id", item.id);
 
-        // Update current progress stats
-        const { count: doneCount, error: countErr } = await supabaseAdmin
-          .from("bulk_import_items")
-          .select("id", { count: "exact", head: true })
-          .eq("job_id", jobId)
-          .in("status", ["completed", "failed", "skipped"]);
+        // Update in-memory progress and batch-flush to DB
+        processedCount++;
+        await flushProgress();
 
-        const doneCountVal = doneCount || 0;
-        const progressPercent = Math.min(Math.round(10 + (doneCountVal / totalFilesCount) * 75), 85); // 10% to 85%
-
-        await supabaseAdmin
-          .from("bulk_import_jobs")
-          .update({
-            progress: progressPercent,
-            current_step: `Processed ${doneCountVal}/${totalFilesCount} files...`,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", jobId);
-
-        // Stagger spacing between jobs
-        await delay(1000);
+        // Minimal yield to avoid event loop starvation (50ms instead of 1000ms)
+        await delay(50);
       }
     };
 
-    // Run parallel workers (Max 2 concurrent)
+    // Run parallel workers
     const workers = Array(concurrencyLimit).fill(null).map(worker);
     await Promise.all(workers);
+
+    // Stop status polling
+    clearInterval(statusPollInterval);
+
+    // Final progress flush
+    await flushProgress(true);
 
     // Finalize matched results if job completed fully without pause/cancel
     const { data: checkJob } = await supabaseAdmin
