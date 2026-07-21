@@ -1,8 +1,10 @@
 import { Router, type Request, type Response } from "express";
+import { PDFParse } from "pdf-parse";
 import { getSupabaseAdmin, supabase } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
-import type { AuthenticatedRequest } from "../types.js";
+import type { AuthenticatedRequest, ExtractionResult } from "../types.js";
+import { localExtract, ocrViaTesseract } from "./extract.js";
 import { z } from "zod";
 
 const router = Router();
@@ -318,6 +320,195 @@ router.delete(
     } catch (err) {
       console.error("Delete paper error:", err);
       res.status(500).json({ error: "Internal server error" });
+    }
+  }
+);
+
+/**
+ * POST /api/papers/auto-audit-fix
+ * Admin only — Auto-audit and auto-fix all papers in the database using hybrid extraction
+ * Body: { googleAccessToken?: string }
+ */
+router.post(
+  "/auto-audit-fix",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const { googleAccessToken } = req.body || {};
+      const supabaseAdmin = getSupabaseAdmin();
+
+      const { data: papers, error: fetchErr } = await supabaseAdmin
+        .from("papers")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (fetchErr) {
+        res.status(500).json({ error: fetchErr.message });
+        return;
+      }
+
+      if (!papers || papers.length === 0) {
+        res.json({ ok: true, totalChecked: 0, fixedCount: 0, updatedPapers: [], restrictedLinks: [] });
+        return;
+      }
+
+      let fixedCount = 0;
+      const updatedPapers: Array<{ id: string; subject: string; changes: string[] }> = [];
+      const restrictedLinks: Array<{ id: string; subject: string; url: string }> = [];
+
+      // Process papers concurrently in batches of 10
+      const chunkSize = 10;
+      for (let i = 0; i < papers.length; i += chunkSize) {
+        const chunk = papers.slice(i, i + chunkSize);
+        await Promise.all(
+          chunk.map(async (p) => {
+            let buffer: Buffer | null = null;
+            let sourceName = p.question_paper_url || "";
+
+            const isSupabase = p.question_paper_url && !p.question_paper_url.startsWith("http");
+            const isGDrive = p.question_paper_url && p.question_paper_url.includes("drive.google.com");
+
+            if (isSupabase) {
+              try {
+                const { data: fileData } = await supabaseAdmin.storage
+                  .from("question-papers")
+                  .download(p.question_paper_url);
+
+                if (fileData) {
+                  buffer = Buffer.from(await fileData.arrayBuffer());
+                }
+              } catch (e) {
+                console.error(`Storage download failed for ${p.id}:`, e);
+              }
+            } else if (isGDrive) {
+              const match = p.question_paper_url.match(/\/d\/([a-zA-Z0-9_-]+)/) || p.question_paper_url.match(/id=([a-zA-Z0-9_-]+)/);
+              const fileId = match ? match[1] : p.question_paper_file_id;
+
+              if (fileId) {
+                // Try fetching using Google OAuth Access Token if available
+                if (googleAccessToken) {
+                  try {
+                    const gRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+                      headers: { Authorization: `Bearer ${googleAccessToken}` },
+                    });
+                    if (gRes.ok) {
+                      const arr = await gRes.arrayBuffer();
+                      buffer = Buffer.from(arr);
+                    }
+                  } catch (e) {
+                    console.error(`GDrive API download failed for fileId ${fileId}:`, e);
+                  }
+                }
+
+                // Fallback to direct public download if access token was missing or failed
+                if (!buffer) {
+                  try {
+                    const dlRes = await fetch(`https://drive.google.com/uc?export=download&id=${fileId}`);
+                    if (dlRes.ok) {
+                      const arr = await dlRes.arrayBuffer();
+                      const b = Buffer.from(arr);
+                      if (b.length > 500) {
+                        buffer = b;
+                      }
+                    }
+                  } catch (e) {
+                    console.error(`GDrive public download failed for fileId ${fileId}:`, e);
+                  }
+                }
+              }
+
+              if (!buffer) {
+                restrictedLinks.push({
+                  id: p.id,
+                  subject: p.subject,
+                  url: p.question_paper_url,
+                });
+              }
+            }
+
+            let localText = "";
+            let extracted: ExtractionResult | null = null;
+
+            try {
+              if (buffer && buffer.length > 500) {
+                const parser = new PDFParse({ data: buffer });
+                const textData = await parser.getText({ first: 2 });
+                await parser.destroy();
+                localText = textData.text || "";
+
+                if (localText.trim().length < 100) {
+                  const ocrText = await ocrViaTesseract(buffer);
+                  if (ocrText && ocrText.trim().length >= 50) {
+                    localText = ocrText;
+                  }
+                }
+              }
+
+              extracted = await localExtract(localText, sourceName);
+            } catch (err) {
+              console.error(`Extraction failed for paper ${p.id}:`, err);
+            }
+
+            if (!extracted) return;
+
+            const updates: Record<string, any> = {};
+            const changes: string[] = [];
+
+            if (extracted.subject.value && extracted.subject.confidence >= 0.70 && extracted.subject.value !== p.subject) {
+              updates.subject = extracted.subject.value;
+              changes.push(`Subject: "${p.subject}" ➔ "${extracted.subject.value}"`);
+            }
+            if (extracted.department.value && extracted.department.confidence >= 0.70 && extracted.department.value !== p.department) {
+              updates.department = extracted.department.value;
+              changes.push(`Dept: "${p.department}" ➔ "${extracted.department.value}"`);
+            }
+            if (extracted.semester.value && extracted.semester.confidence >= 0.70 && extracted.semester.value !== p.semester) {
+              updates.semester = extracted.semester.value;
+              changes.push(`Sem: ${p.semester} ➔ ${extracted.semester.value}`);
+            }
+            if (extracted.academic_year.value && extracted.academic_year.confidence >= 0.70 && extracted.academic_year.value !== p.academic_year) {
+              updates.academic_year = extracted.academic_year.value;
+              changes.push(`Year: "${p.academic_year}" ➔ "${extracted.academic_year.value}"`);
+            }
+            if (extracted.marks.value && extracted.marks.confidence >= 0.70 && extracted.marks.value !== p.marks) {
+              updates.marks = extracted.marks.value;
+              changes.push(`Marks: ${p.marks} ➔ ${extracted.marks.value}`);
+            }
+            if (extracted.exam_type.value && extracted.exam_type.confidence >= 0.70 && extracted.exam_type.value !== p.exam_type) {
+              updates.exam_type = extracted.exam_type.value;
+              changes.push(`Type: "${p.exam_type}" ➔ "${extracted.exam_type.value}"`);
+            }
+
+            if (Object.keys(updates).length > 0) {
+              const { error: updateErr } = await supabaseAdmin
+                .from("papers")
+                .update(updates)
+                .eq("id", p.id);
+
+              if (!updateErr) {
+                fixedCount++;
+                updatedPapers.push({
+                  id: p.id,
+                  subject: updates.subject || p.subject,
+                  changes,
+                });
+              }
+            }
+          })
+        );
+      }
+
+      res.json({
+        ok: true,
+        totalChecked: papers.length,
+        fixedCount,
+        updatedPapers,
+        restrictedLinks,
+      });
+    } catch (err) {
+      console.error("Auto audit & fix error:", err);
+      res.status(500).json({ error: err instanceof Error ? err.message : "Auto audit failed" });
     }
   }
 );

@@ -136,3 +136,20 @@ export async function extractPdfMetadata(
     body,
   });
 }
+
+export interface AuditFixResult {
+  ok: boolean;
+  totalChecked: number;
+  fixedCount: number;
+  updatedPapers: Array<{ id: string; subject: string; changes: string[] }>;
+  restrictedLinks: Array<{ id: string; subject: string; url: string }>;
+  error?: string;
+}
+
+export async function runAutoAuditFix(googleAccessToken?: string): Promise<AuditFixResult> {
+  return apiFetch("/papers/auto-audit-fix", {
+    method: "POST",
+    body: { googleAccessToken: googleAccessToken || null },
+  });
+}
+

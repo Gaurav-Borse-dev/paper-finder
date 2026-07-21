@@ -8,7 +8,8 @@ import {
 } from "lucide-react";
 import {
   fetchPapers, uploadPdf, createPaper, updatePaper, deletePaper,
-  extractPdfMetadata, type Paper, type PaperSource, type ExtractionResult, type ExtractionField,
+  extractPdfMetadata, runAutoAuditFix,
+  type Paper, type PaperSource, type ExtractionResult, type ExtractionField, type AuditFixResult,
 } from "@/services/papers";
 import { fetchLookup, addLookup, deleteLookup } from "@/services/lookups";
 import { fetchFeedback, deleteFeedbackById } from "@/services/feedback";
@@ -699,10 +700,17 @@ function FileSection({
 
 /* -------- Manage Papers -------- */
 
+type AuditState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "done"; result: AuditFixResult }
+  | { kind: "error"; message: string };
+
 function ManagePapers({ onEdit }: { onEdit: (p: Paper) => void }) {
   const qc = useQueryClient();
   const [q, setQ] = useState("");
   const { data: papers } = useQuery({ queryKey: ["papers"], queryFn: fetchPapers });
+  const [audit, setAudit] = useState<AuditState>({ kind: "idle" });
   const filtered = useMemo(() => {
     const s = q.toLowerCase().trim();
     if (!s) return papers ?? [];
@@ -719,12 +727,116 @@ function ManagePapers({ onEdit }: { onEdit: (p: Paper) => void }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const handleAutoAuditFix = async () => {
+    if (audit.kind === "running") return;
+    setAudit({ kind: "running" });
+    try {
+      const result = await runAutoAuditFix();
+      if (result.error) {
+        setAudit({ kind: "error", message: result.error });
+        return;
+      }
+      setAudit({ kind: "done", result });
+      qc.invalidateQueries({ queryKey: ["papers"] });
+      if (result.fixedCount > 0) {
+        toast.success(`Auto-fixed ${result.fixedCount} paper${result.fixedCount === 1 ? "" : "s"}!`);
+      } else {
+        toast.info("All papers already have correct metadata.");
+      }
+    } catch (e) {
+      setAudit({ kind: "error", message: e instanceof Error ? e.message : "Auto audit failed" });
+    }
+  };
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 shadow-[var(--shadow-elevated)]">
-        <Search className="h-4 w-4 text-muted-foreground" />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search subject, department, year..." className="w-full bg-transparent text-sm outline-none" />
+      {/* Search + Auto-Fix Button */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-1 items-center gap-2 rounded-full border border-border bg-card px-4 py-2 shadow-[var(--shadow-elevated)]">
+          <Search className="h-4 w-4 text-muted-foreground" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search subject, department, year..." className="w-full bg-transparent text-sm outline-none" />
+        </div>
+        <button
+          onClick={handleAutoAuditFix}
+          disabled={audit.kind === "running"}
+          className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-2 text-sm font-semibold text-white shadow-lg transition hover:from-violet-700 hover:to-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {audit.kind === "running" ? (
+            <><Loader2 className="h-4 w-4 animate-spin" /> Scanning All Papers...</>
+          ) : (
+            <><Sparkles className="h-4 w-4" /> Auto-Fix All Papers with AI</>
+          )}
+        </button>
       </div>
+
+      {/* Audit Results Banner */}
+      {audit.kind === "done" && (
+        <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+              <span className="font-semibold text-emerald-800">Audit Complete</span>
+            </div>
+            <button onClick={() => setAudit({ kind: "idle" })} className="rounded-full p-1 hover:bg-muted">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-3 text-center">
+            <div className="rounded-xl bg-muted/50 p-3">
+              <p className="text-2xl font-bold">{audit.result.totalChecked}</p>
+              <p className="text-xs text-muted-foreground">Papers Scanned</p>
+            </div>
+            <div className="rounded-xl bg-emerald-500/10 p-3">
+              <p className="text-2xl font-bold text-emerald-700">{audit.result.fixedCount}</p>
+              <p className="text-xs text-muted-foreground">Papers Fixed</p>
+            </div>
+            <div className="rounded-xl bg-amber-500/10 p-3">
+              <p className="text-2xl font-bold text-amber-700">{audit.result.restrictedLinks.length}</p>
+              <p className="text-xs text-muted-foreground">Restricted Links</p>
+            </div>
+          </div>
+          {audit.result.updatedPapers.length > 0 && (
+            <div className="max-h-60 space-y-2 overflow-y-auto">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Changes Made</p>
+              {audit.result.updatedPapers.map((up) => (
+                <div key={up.id} className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-sm">
+                  <p className="font-medium">{up.subject}</p>
+                  <ul className="mt-1 space-y-0.5">
+                    {up.changes.map((c, i) => (
+                      <li key={i} className="text-xs text-muted-foreground">{c}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+          {audit.result.restrictedLinks.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium uppercase tracking-wider text-amber-700">Restricted Google Drive Links (need &quot;Anyone with the link&quot; access)</p>
+              {audit.result.restrictedLinks.map((rl) => (
+                <div key={rl.id} className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs">
+                  <span className="font-medium">{rl.subject}</span> — <a href={rl.url} target="_blank" rel="noopener noreferrer" className="underline text-primary">Open Link</a>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {audit.kind === "error" && (
+        <div className="flex items-start gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+          <div>
+            <p className="font-medium text-destructive">Auto-Audit Failed</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{audit.message}</p>
+          </div>
+          <button onClick={() => setAudit({ kind: "idle" })} className="ml-auto rounded-full p-1 hover:bg-muted">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Papers Table */}
       <div className="overflow-hidden rounded-2xl border border-border bg-card">
         {filtered.length === 0 ? (
           <p className="p-6 text-sm text-muted-foreground">No papers found.</p>
