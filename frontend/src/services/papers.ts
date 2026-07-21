@@ -122,14 +122,17 @@ export interface ExtractionResult {
 }
 
 export async function extractPdfMetadata(
-  pdfBase64: string,
-  filename?: string
+  payload: { pdfBase64?: string; gdriveUrl?: string; filename?: string } | string,
+  filenameParam?: string
 ): Promise<
   | { ok: true; result: ExtractionResult; usedAi?: boolean; aiUnavailable?: boolean }
   | { ok: false; error: string }
 > {
+  const body = typeof payload === "string" 
+    ? { pdfBase64: payload, filename: filenameParam } 
+    : payload;
   return apiFetch("/extract", {
     method: "POST",
-    body: { pdfBase64, filename },
+    body,
   });
 }

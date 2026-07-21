@@ -79,9 +79,12 @@ const EMPTY_RESULT: ExtractionResult = {
  * Body: { pdfBase64: string, filename?: string }
  */
 const extractSchema = z.object({
-  pdfBase64: z.string().min(100, "Invalid PDF payload").trim(),
+  pdfBase64: z.string().min(10, "Invalid PDF payload").optional().nullable(),
+  gdriveUrl: z.string().url("Invalid Google Drive URL").optional().nullable(),
   filename: z.string().max(255).optional().nullable(),
-}).strict();
+}).refine(data => data.pdfBase64 || data.gdriveUrl, {
+  message: "Either pdfBase64 or gdriveUrl must be provided",
+});
 
 router.post(
   "/",
@@ -94,30 +97,60 @@ router.post(
         res.status(400).json({ ok: false, error: validation.error.issues[0].message });
         return;
       }
-      const { pdfBase64, filename } = validation.data;
+      const { pdfBase64: rawPdfBase64, gdriveUrl, filename: rawFilename } = validation.data;
+
+      let pdfBase64 = rawPdfBase64 || "";
+      let filename = rawFilename || "";
+      let pdfBuffer: Buffer | null = null;
+      let gdriveError = "";
+
+      if (!pdfBase64 && gdriveUrl) {
+        const match = gdriveUrl.match(/\/d\/([a-zA-Z0-9_-]+)/) || gdriveUrl.match(/id=([a-zA-Z0-9_-]+)/);
+        const fileId = match ? match[1] : null;
+        if (fileId) {
+          try {
+            const dlUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+            const dlRes = await fetch(dlUrl);
+            if (dlRes.ok) {
+              const arrayBuf = await dlRes.arrayBuffer();
+              pdfBuffer = Buffer.from(arrayBuf);
+              if (pdfBuffer.length > 500) {
+                pdfBase64 = pdfBuffer.toString("base64");
+              }
+            } else {
+              gdriveError = `Google Drive returned status ${dlRes.status} (Access restricted or requires authentication)`;
+            }
+          } catch (err: any) {
+            gdriveError = err?.message || "Failed to download Google Drive link";
+          }
+        }
+      } else if (pdfBase64) {
+        pdfBuffer = Buffer.from(pdfBase64, "base64");
+      }
 
       // Step 2: Local text extraction
       let localText = "";
       let localResult = EMPTY_RESULT;
       try {
-        const pdfBuffer = Buffer.from(pdfBase64, "base64");
-        const parser = new PDFParse({ data: pdfBuffer });
-        const data = await parser.getText({ first: 2 });
-        await parser.destroy();
-        localText = data.text || "";
+        if (pdfBuffer && pdfBuffer.length > 500) {
+          const parser = new PDFParse({ data: pdfBuffer });
+          const data = await parser.getText({ first: 2 });
+          await parser.destroy();
+          localText = data.text || "";
 
-        // Level 4 OCR fallback for scanned PDFs
-        if (localText.trim().length < 100) {
-          console.log(`[OCR] Direct upload: Short text (${localText.trim().length} chars). Triggering Level 4 OCR...`);
-          const ocrText = await ocrViaTesseract(pdfBuffer);
-          if (ocrText && ocrText.trim().length >= 100) {
-            console.log(`[OCR] Successfully OCR'd ${ocrText.trim().length} chars.`);
-            localText = ocrText;
+          // Level 4 OCR fallback for scanned PDFs
+          if (localText.trim().length < 100) {
+            console.log(`[OCR] Direct upload: Short text (${localText.trim().length} chars). Triggering Level 4 OCR...`);
+            const ocrText = await ocrViaTesseract(pdfBuffer);
+            if (ocrText && ocrText.trim().length >= 100) {
+              console.log(`[OCR] Successfully OCR'd ${ocrText.trim().length} chars.`);
+              localText = ocrText;
+            }
           }
         }
 
         // Step 3: Heuristic extraction
-        localResult = await localExtract(localText, filename || undefined);
+        localResult = await localExtract(localText, filename || gdriveUrl || undefined);
       } catch (e) {
         console.error("Local text extraction / parsing failed:", e);
       }

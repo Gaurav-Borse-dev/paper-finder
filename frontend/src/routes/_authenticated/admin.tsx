@@ -275,7 +275,39 @@ function UploadForm({ initial, onDone }: { initial: Paper | null; onDone: () => 
     }
   };
 
-  const applyExtraction = (r: ExtractionResult) => {
+  const handleQpUrl = async (url: string) => {
+    setForm((f) => ({ ...f, qpUrl: url }));
+    if (!url || !isValidDriveUrl(url)) {
+      return;
+    }
+    try {
+      setExtract({ kind: "running", step: "Extracting metadata from Google Drive PDF..." });
+      const res = await extractPdfMetadata({ gdriveUrl: url });
+      if (!res.ok) {
+        setExtract({ kind: "error", message: res.error });
+        return;
+      }
+
+      setExtract({ kind: "running", step: "Auto Filling Form..." });
+      applyExtraction(res.result, true);
+      setExtract({
+        kind: "done",
+        result: res.result,
+        usedAi: res.usedAi,
+        aiUnavailable: res.aiUnavailable
+      });
+
+      if (res.aiUnavailable) {
+        toast.warning("Google Drive PDF requires permissions or AI was unavailable.");
+      } else {
+        toast.success("Completed auto-fill from Google Drive link.");
+      }
+    } catch (e) {
+      setExtract({ kind: "error", message: e instanceof Error ? e.message : "Drive extraction failed" });
+    }
+  };
+
+  const applyExtraction = (r: ExtractionResult, forceOverwrite = false) => {
     function valOrEmpty(field: ExtractionField<any>): string {
       if (field.value === null || field.value === undefined) return "";
       // Step 4: If confidence below 60%, leave empty
@@ -283,17 +315,28 @@ function UploadForm({ initial, onDone }: { initial: Paper | null; onDone: () => 
       return String(field.value);
     }
 
-    setForm((prev) => ({
-      ...prev,
-      subject: prev.subject || valOrEmpty(r.subject),
-      subjectCode: prev.subjectCode || valOrEmpty(r.subject_code),
-      department: prev.department || matchLookup(deptsQ.data ?? [], "name", valOrEmpty(r.department)) || "",
-      semester: prev.semester || valOrEmpty(r.semester),
-      academicYear: prev.academicYear || matchLookup(yearsQ.data ?? [], "label", valOrEmpty(r.academic_year)) || valOrEmpty(r.academic_year),
-      examType: prev.examType || matchLookup(typesQ.data ?? [], "name", valOrEmpty(r.exam_type)) || valOrEmpty(r.exam_type),
-      marks: prev.marks || valOrEmpty(r.marks),
-      examDate: prev.examDate || valOrEmpty(r.exam_date),
-    }));
+    setForm((prev) => {
+      const extSub = valOrEmpty(r.subject);
+      const extSubCode = valOrEmpty(r.subject_code);
+      const extDept = matchLookup(deptsQ.data ?? [], "name", valOrEmpty(r.department)) || "";
+      const extSem = valOrEmpty(r.semester);
+      const extYear = matchLookup(yearsQ.data ?? [], "label", valOrEmpty(r.academic_year)) || valOrEmpty(r.academic_year);
+      const extType = matchLookup(typesQ.data ?? [], "name", valOrEmpty(r.exam_type)) || valOrEmpty(r.exam_type);
+      const extMarks = valOrEmpty(r.marks);
+      const extDate = valOrEmpty(r.exam_date);
+
+      return {
+        ...prev,
+        subject: (forceOverwrite && extSub) ? extSub : (prev.subject || extSub),
+        subjectCode: (forceOverwrite && extSubCode) ? extSubCode : (prev.subjectCode || extSubCode),
+        department: (forceOverwrite && extDept) ? extDept : (prev.department || extDept),
+        semester: (forceOverwrite && extSem) ? extSem : (prev.semester || extSem),
+        academicYear: (forceOverwrite && extYear) ? extYear : (prev.academicYear || extYear),
+        examType: (forceOverwrite && extType) ? extType : (prev.examType || extType),
+        marks: (forceOverwrite && extMarks) ? extMarks : (prev.marks || extMarks),
+        examDate: (forceOverwrite && extDate) ? extDate : (prev.examDate || extDate),
+      };
+    });
   };
 
   const mutation = useMutation({
@@ -377,7 +420,7 @@ function UploadForm({ initial, onDone }: { initial: Paper | null; onDone: () => 
         file={form.qpFile}
         onFile={handleQpFile}
         url={form.qpUrl}
-        onUrl={(u) => setForm({ ...form, qpUrl: u })}
+        onUrl={handleQpUrl}
         existingHint={initial?.question_paper_source === "upload" ? "Existing file will be kept if you don't choose a new one." : undefined}
         required
       />
