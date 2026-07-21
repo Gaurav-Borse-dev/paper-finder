@@ -89,6 +89,25 @@ function classifyFile(filename: string, folderPath: string, text: string): Docum
   return "Unknown";
 }
 
+function pickHighestConf<T>(
+  fieldQP: ExtractionField<T> | undefined | null,
+  fieldAK: ExtractionField<T> | undefined | null,
+  fallback?: T | null
+): T | null {
+  const valQP = fieldQP?.value;
+  const valAK = fieldAK?.value;
+  const confQP = (valQP !== null && valQP !== undefined) ? (fieldQP?.confidence ?? 0) : -1;
+  const confAK = (valAK !== null && valAK !== undefined) ? (fieldAK?.confidence ?? 0) : -1;
+
+  if (confQP >= confAK && confQP > 0) {
+    return valQP as T;
+  }
+  if (confAK > confQP && confAK > 0) {
+    return valAK as T;
+  }
+  return fallback !== undefined ? fallback : null;
+}
+
 function calculateMatchScore(qp: any, ak: any): number {
   // 1. Semester guardrail
   if (
@@ -130,6 +149,28 @@ function calculateMatchScore(qp: any, ak: any): number {
     } else {
       return 0; // Mismatched known subjects can never be paired!
     }
+  }
+
+  // 5. Academic Year guardrail (if both high confidence >= 0.70 and different, reject)
+  const qpYear = qp.metadata?.academic_year;
+  const akYear = ak.metadata?.academic_year;
+  if (
+    qpYear?.value && akYear?.value &&
+    (qpYear.confidence ?? 0) >= 0.70 && (akYear.confidence ?? 0) >= 0.70 &&
+    qpYear.value !== akYear.value
+  ) {
+    return 0; // Mismatched high-confidence academic years can never be paired!
+  }
+
+  // 6. Exam Type guardrail (if both high confidence >= 0.70 and different, reject)
+  const qpExam = qp.metadata?.exam_type;
+  const akExam = ak.metadata?.exam_type;
+  if (
+    qpExam?.value && akExam?.value &&
+    (qpExam.confidence ?? 0) >= 0.70 && (akExam.confidence ?? 0) >= 0.70 &&
+    qpExam.value !== akExam.value
+  ) {
+    return 0; // Mismatched high-confidence exam types can never be paired!
   }
 
   let score = 0;
@@ -600,9 +641,9 @@ async function processQueue(jobId: string, googleAccessToken: string) {
           const arrayBuffer = await downloadRes.arrayBuffer();
           fileBuffer = Buffer.from(arrayBuffer);
 
-          // Parse text locally (first page only for speed)
+          // Parse text locally (first 2 pages for metadata coverage)
           const parser = new PDFParse({ data: fileBuffer });
-          const textData = await parser.getText({ first: 1 });
+          const textData = await parser.getText({ first: 2 });
           await parser.destroy();
           localText = textData.text || "";
 
@@ -891,16 +932,25 @@ async function finalizeMatchedResults(jobId: string) {
       status = "Needs Review";
     }
 
-    // Prepare match record
+    // Prepare match record by selecting the highest-confidence values between QP and AK (with DB paper fallbacks)
+    const finalSubject = pickHighestConf(qpMeta.subject, bestAk?.metadata?.subject, dbPaper?.subject || "Unknown Subject");
+    const finalSubjectCode = pickHighestConf(qpMeta.subject_code, bestAk?.metadata?.subject_code, dbPaper?.subject_code || null);
+    const finalDepartment = pickHighestConf(qpMeta.department, bestAk?.metadata?.department, dbPaper?.department || "Unknown");
+    const finalSemester = pickHighestConf(qpMeta.semester, bestAk?.metadata?.semester, dbPaper?.semester || 1);
+    const finalAcademicYear = pickHighestConf(qpMeta.academic_year, bestAk?.metadata?.academic_year, dbPaper?.academic_year || "2024-25");
+    const finalExamType = pickHighestConf(qpMeta.exam_type, bestAk?.metadata?.exam_type, dbPaper?.exam_type || "ESE");
+    const finalMarks = pickHighestConf(qpMeta.marks, bestAk?.metadata?.marks, dbPaper?.marks || 70);
+    const finalExamDate = pickHighestConf(qpMeta.exam_date, bestAk?.metadata?.exam_date, dbPaper?.exam_date || null);
+
     const matchRecord: any = {
-      subject: qpMeta.subject?.value || bestAk?.metadata?.subject?.value || dbPaper?.subject || "Unknown Subject",
-      subject_code: qpMeta.subject_code?.value || bestAk?.metadata?.subject_code?.value || dbPaper?.subject_code || null,
-      department: qpMeta.department?.value || bestAk?.metadata?.department?.value || dbPaper?.department || "Unknown",
-      semester: qpMeta.semester?.value || bestAk?.metadata?.semester?.value || dbPaper?.semester || 1,
-      academic_year: qpMeta.academic_year?.value || bestAk?.metadata?.academic_year?.value || dbPaper?.academic_year || "2024-25",
-      exam_type: qpMeta.exam_type?.value || bestAk?.metadata?.exam_type?.value || dbPaper?.exam_type || "ESE",
-      marks: qpMeta.marks?.value || bestAk?.metadata?.marks?.value || dbPaper?.marks || 70,
-      exam_date: qpMeta.exam_date?.value || bestAk?.metadata?.exam_date?.value || dbPaper?.exam_date || null,
+      subject: finalSubject,
+      subject_code: finalSubjectCode,
+      department: finalDepartment,
+      semester: finalSemester,
+      academic_year: finalAcademicYear,
+      exam_type: finalExamType,
+      marks: finalMarks,
+      exam_date: finalExamDate,
       question_paper: {
         id: qp.file_id,
         name: qp.name,

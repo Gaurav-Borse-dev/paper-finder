@@ -102,7 +102,7 @@ router.post(
       try {
         const pdfBuffer = Buffer.from(pdfBase64, "base64");
         const parser = new PDFParse({ data: pdfBuffer });
-        const data = await parser.getText({ first: 1 });
+        const data = await parser.getText({ first: 2 });
         await parser.destroy();
         localText = data.text || "";
 
@@ -535,14 +535,14 @@ export const SUBJECTS_ALIASES: Record<string, string> = {
 };
 
 const DEPT_ABBRS: Record<string, string[]> = {
-  "Computer Engineering": ["cse", "computer engineering", "comp eng", "comp. eng.", "comp engg", "comp. engg.", "computer", "computer sci", "computer science"],
-  "Information Technology": ["it", "information technology", "infotech", "info tech"],
-  "Mechanical Engineering": ["mech", "mechanical", "mechanical engineering", "mech eng", "mech. eng.", "mech engg", "me"],
-  "Civil Engineering": ["civil", "civil engineering", "ce", "civil eng", "civil engg"],
-  "Electrical Engineering": ["electrical", "electrical engineering", "elect", "ee", "elect eng", "elect engg", "elect. eng."],
-  "Electronics and Telecommunication": ["entc", "e&tc", "etc", "et&c", "electronics", "telecommunication", "ece", "extc", "e & tc"],
-  "Artificial Intelligence and Machine Learning": ["aiml", "ai & ml", "ai/ml", "artificial intelligence", "ai and ml"],
-  "Data Science": ["aids", "data science", "cseds", "ds", "ai & ds", "ai&ds"],
+  "Computer Engineering": ["cse", "computer engineering", "comp eng", "comp. eng.", "comp engg", "comp. engg.", "computer", "computer sci", "computer science", "comp"],
+  "Information Technology": ["it", "information technology", "infotech", "info tech", "info. tech.", "inf. tech."],
+  "Mechanical Engineering": ["mech", "mechanical", "mechanical engineering", "mech eng", "mech. eng.", "mech engg", "mech. engg.", "me"],
+  "Civil Engineering": ["civil", "civil engineering", "ce", "civil eng", "civil engg", "civil. engg."],
+  "Electrical Engineering": ["electrical", "electrical engineering", "elect", "ee", "elect eng", "elect engg", "elect. eng.", "elect. engg."],
+  "Electronics and Telecommunication": ["entc", "e&tc", "etc", "et&c", "electronics", "telecommunication", "ece", "extc", "e & tc", "e.t.c.", "e.n.t.c."],
+  "Artificial Intelligence and Machine Learning": ["aiml", "ai & ml", "ai/ml", "artificial intelligence", "ai and ml", "ai-ml"],
+  "Data Science": ["aids", "data science", "cseds", "ds", "ai & ds", "ai&ds", "ai-ds"],
 };
 
 function getLevenshteinDistance(a: string, b: string): number {
@@ -651,17 +651,24 @@ function matchSemester(str: string): number | null {
     "1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5, "6th": 6, "7th": 7, "8th": 8,
   };
 
-  // Pattern 1: Sem 3, Semester: 5, SEM-III, SEM – 3, S-III
-  const semNumRegex = /\b(?:semester|sem)\s*[:\-–]?\s*([1-8])\b/i;
+  // Pattern 1: Sem 3, Semester: 5, SEM-III, SEM_III, SEM – 3, S-III, SEM3, SEM III
+  const semNumRegex = /\b(?:semester|sem|s)\s*[:\-–\_]?\s*([1-8])\b/i;
   const numMatch = str.match(semNumRegex);
   if (numMatch) {
     return parseInt(numMatch[1], 10);
   }
 
-  const semRomanRegex = /\b(?:semester|sem)\s*[:\-–]?\s*(VIII|VII|VI|IV|V|III|II|I)\b/i;
+  const semRomanRegex = /\b(?:semester|sem|s)\s*[:\-–\_]?\s*(VIII|VII|VI|IV|V|III|II|I)\b/i;
   const romanMatch = str.match(semRomanRegex);
   if (romanMatch) {
     return romanMap[romanMatch[1].toUpperCase()] || null;
+  }
+
+  // Direct Roman numeral pattern like SEM-III, SEM_III, SEMIII
+  const semRomanDirectRegex = /\bSEM[\-\_]?(VIII|VII|VI|IV|V|III|II|I)\b/i;
+  const directRomanMatch = str.match(semRomanDirectRegex);
+  if (directRomanMatch) {
+    return romanMap[directRomanMatch[1].toUpperCase()] || null;
   }
 
   // Pattern 2: "Third Semester", "3rd Semester", "1st Sem"
@@ -675,16 +682,16 @@ function matchSemester(str: string): number | null {
   const isOdd = /\bODD\b/i.test(str);
   const isEven = /\bEVEN\b/i.test(str);
 
-  // FY / F.Y. / First Year / FY B.Tech → Sem 1 (ODD) or 2 (EVEN)
-  if (/\b(?:FY|F\.?\s?Y\.?|first\s*year|fy\s*b\.?\s*tech)\b/i.test(str)) {
+  // FY / F.Y. / F.E. / FE / First Year / FY B.Tech → Sem 1 (ODD) or 2 (EVEN)
+  if (/\b(?:FY|F\.?\s?Y\.?|F\.?\s?E\.?|FE|first\s*year|fy\s*b\.?\s*tech)\b/i.test(str)) {
     return isEven ? 2 : 1;
   }
-  // SY / S.Y. / S.E. / Second Year → Sem 3 (ODD) or 4 (EVEN)
-  if (/\b(?:SY|S\.?\s?Y\.?|S\.?\s?E\.?|second\s*year|sy\s*b\.?\s*tech)\b/i.test(str)) {
+  // SY / S.Y. / S.E. / SE / Second Year → Sem 3 (ODD) or 4 (EVEN)
+  if (/\b(?:SY|S\.?\s?Y\.?|S\.?\s?E\.?|SE|second\s*year|sy\s*b\.?\s*tech)\b/i.test(str)) {
     return isEven ? 4 : 3;
   }
-  // TY / T.Y. / T.E. / Third Year → Sem 5 (ODD) or 6 (EVEN)
-  if (/\b(?:TY|T\.?\s?Y\.?|T\.?\s?E\.?|third\s*year|ty\s*b\.?\s*tech)\b/i.test(str)) {
+  // TY / T.Y. / T.E. / TE / Third Year → Sem 5 (ODD) or 6 (EVEN)
+  if (/\b(?:TY|T\.?\s?Y\.?|T\.?\s?E\.?|TE|third\s*year|ty\s*b\.?\s*tech)\b/i.test(str)) {
     return isEven ? 6 : 5;
   }
   // BE / B.E. / Final Year / Final → Sem 7 (ODD) or 8 (EVEN)
@@ -715,6 +722,7 @@ function matchExamType(str: string): "ESE" | "RE-ESE" | "Supplementary" | "Compl
   if (/\b(?:supplementary|supp)\b/i.test(str)) {
     return "Supplementary";
   }
+  // Strictly match complementary (do NOT match "comp" which conflicts with Computer/Component)
   if (/\b(?:complementary)\b/i.test(str)) {
     return "Complementary";
   }
@@ -726,7 +734,7 @@ function matchExamType(str: string): "ESE" | "RE-ESE" | "Supplementary" | "Compl
 }
 
 function matchMarks(str: string): number | null {
-  // Only match marks when preceded by marks-related keywords — never match bare numbers
+  // Only match marks when preceded by explicit marks keywords — never match bare numbers
   const marksPatterns = [
     /\b(?:max\.?\s*marks|maximum\s+marks|total\s+marks|full\s+marks)\s*[:\-–]?\s*(\d{2,3})\b/i,
     /\bmarks\s*[:\-–]?\s*(\d{2,3})\b/i,
@@ -736,11 +744,9 @@ function matchMarks(str: string): number | null {
     const match = str.match(regex);
     if (match) {
       const val = parseInt(match[1], 10);
-      // Validate: marks are typically 50, 60, 65, 70, 75, 80, or 100
       if ([50, 60, 65, 70, 75, 80, 100].includes(val)) {
         return val;
       }
-      // Accept other 2-3 digit values if explicitly preceded by "marks"
       if (val >= 20 && val <= 200) {
         return val;
       }
@@ -770,17 +776,44 @@ export function parseFromFilename(filename: string, dynamicAliases?: Record<stri
 
   const fnClean = filename.replace(/\.pdf$/i, "").replace(/[\_\-]+/g, " ").trim();
 
-  // Try alias lookup first (abbreviations like BEEDE, DSA, EM-III)
-  const alias = lookupSubjectAlias(fnClean, dynamicAliases);
-  if (alias) {
-    result.subject = { value: alias, confidence: 0.70 };
+  // Process structured fields FIRST before stripping
+  const matchedDept = matchDepartment(fnClean);
+  if (matchedDept) {
+    result.department = { value: matchedDept, confidence: 0.85 };
   }
 
-  // If no alias matched, try extracting a full subject name from the filename
-  // Patterns: "QP 75 AIML SEM 3 Engineering Mathematics III"
-  //           "ENGG CHEMISTRY QP"
-  //           "Machine Learning comp QP"
-  //           "AK SY MECH SEM III Manufacturing Processes 12.01.2024"
+  const matchedSem = matchSemester(fnClean);
+  if (matchedSem) {
+    result.semester = { value: matchedSem, confidence: 0.85 };
+  }
+
+  const matchedYear = matchAcademicYear(fnClean);
+  if (matchedYear) {
+    result.academic_year = { value: matchedYear, confidence: 0.85 };
+  }
+
+  const matchedExamType = matchExamType(fnClean);
+  if (matchedExamType) {
+    result.exam_type = { value: matchedExamType, confidence: 0.85 };
+  }
+
+  const matchedMarks = matchMarks(fnClean);
+  if (matchedMarks) {
+    result.marks = { value: matchedMarks, confidence: 0.85 };
+  }
+
+  const matchedCode = matchSubjectCode(fnClean);
+  if (matchedCode) {
+    result.subject_code = { value: matchedCode, confidence: 0.85 };
+  }
+
+  // Try alias lookup (abbreviations like BEEDE, DSA, EM-III)
+  const alias = lookupSubjectAlias(fnClean, dynamicAliases);
+  if (alias) {
+    result.subject = { value: alias, confidence: 0.85 };
+  }
+
+  // If no alias matched, isolate full subject candidate from filename
   if (!result.subject.value) {
     let subjectCandidate = fnClean
       .replace(/\b(?:QP|AK|RCPIT|synoptics|SYNOPTICS|FY|SY|TY|BE|BTECH|FYBTECH|SYBTECH|TYBTECH)\b/gi, "")
@@ -804,58 +837,26 @@ export function parseFromFilename(filename: string, dynamicAliases?: Record<stri
 
     // Clean up and title-case if the candidate looks like a real subject name
     if (subjectCandidate.length >= 3 && subjectCandidate.length <= 80) {
-      // Check if this matches a known subject from the alias table values
       const lowerCandidate = subjectCandidate.toLowerCase();
       let foundAlias = false;
       for (const fullName of Object.values(SUBJECTS_ALIASES)) {
         if (fullName.toLowerCase() === lowerCandidate || lowerCandidate.includes(fullName.toLowerCase())) {
-          result.subject = { value: fullName, confidence: 0.70 };
+          result.subject = { value: fullName, confidence: 0.85 };
           foundAlias = true;
           break;
         }
       }
       if (!foundAlias && subjectCandidate.length >= 5) {
-        // Title-case it
         const titleCased = subjectCandidate
           .split(" ")
           .filter(w => w.length > 0)
           .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
           .join(" ");
         if (titleCased.length >= 5) {
-          result.subject = { value: titleCased, confidence: 0.40 };
+          result.subject = { value: titleCased, confidence: 0.70 };
         }
       }
     }
-  }
-
-  const matchedDept = matchDepartment(fnClean);
-  if (matchedDept) {
-    result.department = { value: matchedDept, confidence: 0.50 };
-  }
-
-  const matchedSem = matchSemester(fnClean);
-  if (matchedSem) {
-    result.semester = { value: matchedSem, confidence: 0.50 };
-  }
-
-  const matchedYear = matchAcademicYear(fnClean);
-  if (matchedYear) {
-    result.academic_year = { value: matchedYear, confidence: 0.50 };
-  }
-
-  const matchedExamType = matchExamType(fnClean);
-  if (matchedExamType) {
-    result.exam_type = { value: matchedExamType, confidence: 0.50 };
-  }
-
-  const matchedMarks = matchMarks(fnClean);
-  if (matchedMarks) {
-    result.marks = { value: matchedMarks, confidence: 0.50 };
-  }
-
-  const matchedCode = matchSubjectCode(fnClean);
-  if (matchedCode) {
-    result.subject_code = { value: matchedCode, confidence: 0.50 };
   }
 
   return result;
