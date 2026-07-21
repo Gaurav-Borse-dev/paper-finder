@@ -702,7 +702,14 @@ function FileSection({
 
 type AuditState =
   | { kind: "idle" }
-  | { kind: "running" }
+  | {
+      kind: "running";
+      checked: number;
+      total: number;
+      fixedCount: number;
+      currentPaper: string;
+      liveFixed: Array<{ id: string; subject: string; changes: string[] }>;
+    }
   | { kind: "done"; result: AuditFixResult }
   | { kind: "error"; message: string };
 
@@ -729,9 +736,40 @@ function ManagePapers({ onEdit }: { onEdit: (p: Paper) => void }) {
 
   const handleAutoAuditFix = async () => {
     if (audit.kind === "running") return;
-    setAudit({ kind: "running" });
+    setAudit({
+      kind: "running",
+      checked: 0,
+      total: 0,
+      fixedCount: 0,
+      currentPaper: "Starting scan...",
+      liveFixed: [],
+    });
     try {
-      const result = await runAutoAuditFix();
+      const result = await runAutoAuditFix(undefined, false, (ev) => {
+        if (ev.type === "progress") {
+          setAudit((prev) => {
+            if (prev.kind !== "running") return prev;
+            return {
+              ...prev,
+              checked: ev.checked ?? prev.checked,
+              total: ev.total ?? prev.total,
+              fixedCount: ev.fixedCount ?? prev.fixedCount,
+              currentPaper: ev.currentPaper ?? prev.currentPaper,
+            };
+          });
+        } else if (ev.type === "paper-fixed" && ev.paper) {
+          const newFixed = ev.paper;
+          setAudit((prev) => {
+            if (prev.kind !== "running") return prev;
+            if (prev.liveFixed.some((f) => f.id === newFixed.id)) return prev;
+            return {
+              ...prev,
+              liveFixed: [...prev.liveFixed, newFixed],
+            };
+          });
+        }
+      });
+
       if (result.error) {
         setAudit({ kind: "error", message: result.error });
         return;
@@ -768,6 +806,51 @@ function ManagePapers({ onEdit }: { onEdit: (p: Paper) => void }) {
           )}
         </button>
       </div>
+
+      {/* Live Running Progress */}
+      {audit.kind === "running" && (
+        <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-5 w-5 animate-spin text-primary" />
+              <span className="font-semibold text-primary">Scanning & Auto-Correcting...</span>
+            </div>
+            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+              {audit.checked} / {audit.total} Papers
+            </span>
+          </div>
+
+          {/* Progress Bar */}
+          <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+            <div
+              className="bg-primary h-2 transition-all duration-300"
+              style={{ width: `${audit.total > 0 ? (audit.checked / audit.total) * 100 : 0}%` }}
+            />
+          </div>
+
+          <div className="flex justify-between items-center text-xs text-muted-foreground">
+            <span>Current: <strong className="text-foreground">{audit.currentPaper}</strong></span>
+            <span>Fixed so far: <strong className="text-emerald-600 font-bold">{audit.fixedCount}</strong></span>
+          </div>
+
+          {/* Live Fixed Papers list */}
+          {audit.liveFixed.length > 0 && (
+            <div className="mt-3 max-h-40 space-y-2 overflow-y-auto">
+              <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wider">Corrected Live</p>
+              {audit.liveFixed.map((up) => (
+                <div key={up.id} className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-1.5 text-xs">
+                  <span className="font-medium text-foreground">{up.subject}</span>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {up.changes.map((c, i) => (
+                      <li key={i} className="text-muted-foreground text-[10px]">• {c}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Audit Results Banner */}
       {audit.kind === "done" && (

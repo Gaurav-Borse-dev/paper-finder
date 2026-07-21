@@ -146,10 +146,102 @@ export interface AuditFixResult {
   error?: string;
 }
 
-export async function runAutoAuditFix(googleAccessToken?: string): Promise<AuditFixResult> {
-  return apiFetch("/papers/auto-audit-fix", {
+export interface AuditProgressUpdate {
+  type: "progress" | "paper-fixed" | "done" | "error";
+  checked?: number;
+  total?: number;
+  fixedCount?: number;
+  currentPaper?: string;
+  paper?: { id: string; subject: string; changes: string[] };
+  totalChecked?: number;
+  updatedPapers?: Array<{ id: string; subject: string; changes: string[] }>;
+  restrictedLinks?: Array<{ id: string; subject: string; url: string }>;
+  message?: string;
+}
+
+export async function runAutoAuditFix(
+  googleAccessToken?: string,
+  force = false,
+  onEvent?: (event: AuditProgressUpdate) => void
+): Promise<AuditFixResult> {
+  const token = localStorage.getItem("papervault_access_token");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const url = (import.meta.env.VITE_API_URL as string) || "";
+  const cleanUrl = url.replace(/\/$/, "");
+  const apiBase = cleanUrl.endsWith("/api") ? cleanUrl : `${cleanUrl}/api`;
+
+  const response = await fetch(`${apiBase}/papers/auto-audit-fix`, {
     method: "POST",
-    body: { googleAccessToken: googleAccessToken || null },
+    headers,
+    body: JSON.stringify({ googleAccessToken: googleAccessToken || null, force }),
   });
+
+  if (!response.ok) {
+    throw new Error(`Server returned HTTP ${response.status}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Response body is not readable");
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let finalResult: AuditFixResult = {
+    ok: true,
+    totalChecked: 0,
+    fixedCount: 0,
+    updatedPapers: [],
+    restrictedLinks: [],
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n\n");
+    // Keep the last partial line in the buffer
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (line.startsWith("data: ")) {
+        try {
+          const data: AuditProgressUpdate = JSON.parse(line.slice(6));
+          if (onEvent) {
+            onEvent(data);
+          }
+          if (data.type === "done") {
+            finalResult = {
+              ok: true,
+              totalChecked: data.totalChecked || 0,
+              fixedCount: data.fixedCount || 0,
+              updatedPapers: data.updatedPapers || [],
+              restrictedLinks: data.restrictedLinks || [],
+            };
+          } else if (data.type === "error") {
+            finalResult = {
+              ok: false,
+              totalChecked: 0,
+              fixedCount: 0,
+              updatedPapers: [],
+              restrictedLinks: [],
+              error: data.message,
+            };
+          }
+        } catch (e) {
+          console.error("Failed to parse SSE event:", e);
+        }
+      }
+    }
+  }
+
+  return finalResult;
 }
 

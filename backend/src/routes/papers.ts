@@ -334,9 +334,19 @@ router.post(
   requireAuth,
   requireAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    const sendEvent = (type: string, payload: any) => {
+      res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
+    };
+
     try {
-      const { googleAccessToken } = req.body || {};
+      const { googleAccessToken, force } = req.body || {};
       const supabaseAdmin = getSupabaseAdmin();
+
+      // Establish Server-Sent Events (SSE) connection
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
 
       const { data: papers, error: fetchErr } = await supabaseAdmin
         .from("papers")
@@ -344,25 +354,50 @@ router.post(
         .order("created_at", { ascending: false });
 
       if (fetchErr) {
-        res.status(500).json({ error: fetchErr.message });
+        sendEvent("error", { message: fetchErr.message });
+        res.end();
         return;
       }
 
       if (!papers || papers.length === 0) {
-        res.json({ ok: true, totalChecked: 0, fixedCount: 0, updatedPapers: [], restrictedLinks: [] });
+        sendEvent("done", { totalChecked: 0, fixedCount: 0, updatedPapers: [], restrictedLinks: [] });
+        res.end();
         return;
       }
 
+      let checkedCount = 0;
       let fixedCount = 0;
       const updatedPapers: Array<{ id: string; subject: string; changes: string[] }> = [];
       const restrictedLinks: Array<{ id: string; subject: string; url: string }> = [];
 
-      // Process papers concurrently in batches of 10
-      const chunkSize = 10;
-      for (let i = 0; i < papers.length; i += chunkSize) {
-        const chunk = papers.slice(i, i + chunkSize);
+      // Concurrency Limit: 15 workers
+      const concurrencyLimit = 15;
+      const totalPapers = papers.length;
+
+      // Group papers into chunks of size `concurrencyLimit`
+      for (let i = 0; i < totalPapers; i += concurrencyLimit) {
+        const chunk = papers.slice(i, i + concurrencyLimit);
         await Promise.all(
           chunk.map(async (p) => {
+            // Speed Optimization: Skip auditing if metadata is already populated and high-confidence exists
+            const isPerfect =
+              p.subject && p.subject !== "Unknown Subject" &&
+              p.department && p.department !== "Unknown" &&
+              p.semester && p.marks && p.academic_year && p.exam_type &&
+              p.extraction_confidence && typeof p.extraction_confidence === "object" &&
+              (p.extraction_confidence as any).subject?.confidence >= 0.85;
+
+            if (isPerfect && !force) {
+              checkedCount++;
+              sendEvent("progress", {
+                checked: checkedCount,
+                total: totalPapers,
+                fixedCount,
+                currentPaper: p.subject,
+              });
+              return;
+            }
+
             let buffer: Buffer | null = null;
             let sourceName = p.question_paper_url || "";
 
@@ -386,7 +421,6 @@ router.post(
               const fileId = match ? match[1] : p.question_paper_file_id;
 
               if (fileId) {
-                // Try fetching using Google OAuth Access Token if available
                 if (googleAccessToken) {
                   try {
                     const gRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
@@ -401,7 +435,6 @@ router.post(
                   }
                 }
 
-                // Fallback to direct public download if access token was missing or failed
                 if (!buffer) {
                   try {
                     const dlRes = await fetch(`https://drive.google.com/uc?export=download&id=${fileId}`);
@@ -450,65 +483,76 @@ router.post(
               console.error(`Extraction failed for paper ${p.id}:`, err);
             }
 
-            if (!extracted) return;
+            if (extracted) {
+              const updates: Record<string, any> = {};
+              const changes: string[] = [];
 
-            const updates: Record<string, any> = {};
-            const changes: string[] = [];
+              if (extracted.subject.value && extracted.subject.confidence >= 0.70 && extracted.subject.value !== p.subject) {
+                updates.subject = extracted.subject.value;
+                changes.push(`Subject: "${p.subject}" ➔ "${extracted.subject.value}"`);
+              }
+              if (extracted.department.value && extracted.department.confidence >= 0.70 && extracted.department.value !== p.department) {
+                updates.department = extracted.department.value;
+                changes.push(`Dept: "${p.department}" ➔ "${extracted.department.value}"`);
+              }
+              if (extracted.semester.value && extracted.semester.confidence >= 0.70 && extracted.semester.value !== p.semester) {
+                updates.semester = extracted.semester.value;
+                changes.push(`Sem: ${p.semester} ➔ ${extracted.semester.value}`);
+              }
+              if (extracted.academic_year.value && extracted.academic_year.confidence >= 0.70 && extracted.academic_year.value !== p.academic_year) {
+                updates.academic_year = extracted.academic_year.value;
+                changes.push(`Year: "${p.academic_year}" ➔ "${extracted.academic_year.value}"`);
+              }
+              if (extracted.marks.value && extracted.marks.confidence >= 0.70 && extracted.marks.value !== p.marks) {
+                updates.marks = extracted.marks.value;
+                changes.push(`Marks: ${p.marks} ➔ ${extracted.marks.value}`);
+              }
+              if (extracted.exam_type.value && extracted.exam_type.confidence >= 0.70 && extracted.exam_type.value !== p.exam_type) {
+                updates.exam_type = extracted.exam_type.value;
+                changes.push(`Type: "${p.exam_type}" ➔ "${extracted.exam_type.value}"`);
+              }
 
-            if (extracted.subject.value && extracted.subject.confidence >= 0.70 && extracted.subject.value !== p.subject) {
-              updates.subject = extracted.subject.value;
-              changes.push(`Subject: "${p.subject}" ➔ "${extracted.subject.value}"`);
-            }
-            if (extracted.department.value && extracted.department.confidence >= 0.70 && extracted.department.value !== p.department) {
-              updates.department = extracted.department.value;
-              changes.push(`Dept: "${p.department}" ➔ "${extracted.department.value}"`);
-            }
-            if (extracted.semester.value && extracted.semester.confidence >= 0.70 && extracted.semester.value !== p.semester) {
-              updates.semester = extracted.semester.value;
-              changes.push(`Sem: ${p.semester} ➔ ${extracted.semester.value}`);
-            }
-            if (extracted.academic_year.value && extracted.academic_year.confidence >= 0.70 && extracted.academic_year.value !== p.academic_year) {
-              updates.academic_year = extracted.academic_year.value;
-              changes.push(`Year: "${p.academic_year}" ➔ "${extracted.academic_year.value}"`);
-            }
-            if (extracted.marks.value && extracted.marks.confidence >= 0.70 && extracted.marks.value !== p.marks) {
-              updates.marks = extracted.marks.value;
-              changes.push(`Marks: ${p.marks} ➔ ${extracted.marks.value}`);
-            }
-            if (extracted.exam_type.value && extracted.exam_type.confidence >= 0.70 && extracted.exam_type.value !== p.exam_type) {
-              updates.exam_type = extracted.exam_type.value;
-              changes.push(`Type: "${p.exam_type}" ➔ "${extracted.exam_type.value}"`);
-            }
+              if (Object.keys(updates).length > 0) {
+                const { error: updateErr } = await supabaseAdmin
+                  .from("papers")
+                  .update(updates)
+                  .eq("id", p.id);
 
-            if (Object.keys(updates).length > 0) {
-              const { error: updateErr } = await supabaseAdmin
-                .from("papers")
-                .update(updates)
-                .eq("id", p.id);
-
-              if (!updateErr) {
-                fixedCount++;
-                updatedPapers.push({
-                  id: p.id,
-                  subject: updates.subject || p.subject,
-                  changes,
-                });
+                if (!updateErr) {
+                  fixedCount++;
+                  const updateItem = {
+                    id: p.id,
+                    subject: updates.subject || p.subject,
+                    changes,
+                  };
+                  updatedPapers.push(updateItem);
+                  sendEvent("paper-fixed", { paper: updateItem });
+                }
               }
             }
+
+            checkedCount++;
+            sendEvent("progress", {
+              checked: checkedCount,
+              total: totalPapers,
+              fixedCount,
+              currentPaper: p.subject,
+            });
           })
         );
       }
 
-      res.json({
-        ok: true,
-        totalChecked: papers.length,
+      sendEvent("done", {
+        totalChecked: totalPapers,
         fixedCount,
         updatedPapers,
         restrictedLinks,
       });
+      res.end();
     } catch (err) {
       console.error("Auto audit & fix error:", err);
-      res.status(500).json({ error: err instanceof Error ? err.message : "Auto audit failed" });
+      sendEvent("error", { message: err instanceof Error ? err.message : "Auto audit failed" });
+      res.end();
     }
   }
 );
