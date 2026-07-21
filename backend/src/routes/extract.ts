@@ -805,7 +805,9 @@ function matchSubjectCode(str: string): string | null {
 
 export function parseFromFilename(filename: string, dynamicAliases?: Record<string, string>): ExtractionResult {
   const result: ExtractionResult = JSON.parse(JSON.stringify(EMPTY_RESULT));
-  if (!filename) return result;
+  if (!filename || filename.trim().startsWith("http://") || filename.trim().startsWith("https://") || filename.includes("drive.google.com") || filename.includes("/file/d/")) {
+    return result;
+  }
 
   const fnClean = filename.replace(/\.pdf$/i, "").replace(/[\_\-]+/g, " ").trim();
 
@@ -1186,6 +1188,21 @@ export async function localExtract(text: string, filename?: string, folderPath?:
     }
     result[k] = best as any;
   });
+
+  // Sanitize subject to ensure URLs are NEVER returned as subjects
+  if (result.subject?.value) {
+    const val = String(result.subject.value).toLowerCase();
+    if (
+      val.includes("http") ||
+      val.includes("drive.google") ||
+      val.includes("/file/d/") ||
+      val.includes(".com/") ||
+      val.endsWith(".com") ||
+      val.endsWith(".org")
+    ) {
+      result.subject = { value: null, confidence: 0 };
+    }
+  }
 
   return result;
 }

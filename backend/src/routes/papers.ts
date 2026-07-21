@@ -370,17 +370,31 @@ router.post(
       const updatedPapers: Array<{ id: string; subject: string; changes: string[] }> = [];
       const restrictedLinks: Array<{ id: string; subject: string; url: string }> = [];
 
-      // Concurrency Limit: 15 workers
-      const concurrencyLimit = 15;
+      // Concurrency Limit: 5 workers to prevent Google Drive IP throttling on cloud servers
+      const concurrencyLimit = 5;
       const totalPapers = papers.length;
+
+      const fetchWithTimeout = async (url: string, opts: RequestInit = {}, timeoutMs = 5000) => {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetch(url, { ...opts, signal: controller.signal });
+          clearTimeout(id);
+          return res;
+        } catch (e) {
+          clearTimeout(id);
+          throw e;
+        }
+      };
 
       // Group papers into chunks of size `concurrencyLimit`
       for (let i = 0; i < totalPapers; i += concurrencyLimit) {
         const chunk = papers.slice(i, i + concurrencyLimit);
         await Promise.all(
           chunk.map(async (p) => {
-            // Speed Optimization: Skip auditing if metadata is already populated and high-confidence exists
+            const isCorruptedSubject = p.subject && (p.subject.toLowerCase().includes("http") || p.subject.toLowerCase().includes("drive.google") || p.subject.toLowerCase().includes("/file/d/"));
             const isPerfect =
+              !isCorruptedSubject &&
               p.subject && p.subject !== "Unknown Subject" &&
               p.department && p.department !== "Unknown" &&
               p.semester && p.marks && p.academic_year && p.exam_type &&
@@ -399,7 +413,7 @@ router.post(
             }
 
             let buffer: Buffer | null = null;
-            let sourceName = p.question_paper_url || "";
+            let sourceName = p.question_paper_url && !p.question_paper_url.startsWith("http") ? p.question_paper_url : undefined;
 
             const isSupabase = p.question_paper_url && !p.question_paper_url.startsWith("http");
             const isGDrive = p.question_paper_url && p.question_paper_url.includes("drive.google.com");
@@ -423,30 +437,47 @@ router.post(
               if (fileId) {
                 if (googleAccessToken) {
                   try {
-                    const gRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+                    const gRes = await fetchWithTimeout(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
                       headers: { Authorization: `Bearer ${googleAccessToken}` },
-                    });
+                    }, 5000);
                     if (gRes.ok) {
                       const arr = await gRes.arrayBuffer();
                       buffer = Buffer.from(arr);
                     }
                   } catch (e) {
-                    console.error(`GDrive API download failed for fileId ${fileId}:`, e);
+                    // API download failed or timed out
                   }
                 }
 
+                // 1. Try Google Direct CDN endpoint (fastest, rarely throttled)
                 if (!buffer) {
                   try {
-                    const dlRes = await fetch(`https://drive.google.com/uc?export=download&id=${fileId}`);
-                    if (dlRes.ok) {
-                      const arr = await dlRes.arrayBuffer();
+                    const cdnRes = await fetchWithTimeout(`https://lh3.googleusercontent.com/d/${fileId}`, {}, 5000);
+                    if (cdnRes.ok) {
+                      const arr = await cdnRes.arrayBuffer();
                       const b = Buffer.from(arr);
-                      if (b.length > 500) {
+                      if (b.length > 500 && b.subarray(0, 4).toString() === "%PDF") {
                         buffer = b;
                       }
                     }
                   } catch (e) {
-                    console.error(`GDrive public download failed for fileId ${fileId}:`, e);
+                    // CDN download failed or timed out
+                  }
+                }
+
+                // 2. Try export=download endpoint fallback
+                if (!buffer) {
+                  try {
+                    const dlRes = await fetchWithTimeout(`https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`, {}, 5000);
+                    if (dlRes.ok) {
+                      const arr = await dlRes.arrayBuffer();
+                      const b = Buffer.from(arr);
+                      if (b.length > 500 && (b.subarray(0, 4).toString() === "%PDF" || b.includes(Buffer.from("%PDF")))) {
+                        buffer = b;
+                      }
+                    }
+                  } catch (e) {
+                    // Public download failed or timed out
                   }
                 }
               }
@@ -487,7 +518,9 @@ router.post(
               const updates: Record<string, any> = {};
               const changes: string[] = [];
 
-              if (extracted.subject.value && extracted.subject.confidence >= 0.70 && extracted.subject.value !== p.subject) {
+              const isUrlLike = (val: any) => typeof val === "string" && (val.toLowerCase().includes("http") || val.toLowerCase().includes("drive.google") || val.toLowerCase().includes("/file/d/") || val.toLowerCase().includes(".com"));
+
+              if (extracted.subject.value && extracted.subject.confidence >= 0.70 && extracted.subject.value !== p.subject && !isUrlLike(extracted.subject.value)) {
                 updates.subject = extracted.subject.value;
                 changes.push(`Subject: "${p.subject}" ➔ "${extracted.subject.value}"`);
               }
