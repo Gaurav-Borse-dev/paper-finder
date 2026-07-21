@@ -201,44 +201,58 @@ export async function runAutoAuditFix(
     restrictedLinks: [],
   };
 
+  const processSSELine = (rawLine: string) => {
+    const line = rawLine.trim();
+    if (line.startsWith("data: ")) {
+      try {
+        const data: AuditProgressUpdate = JSON.parse(line.slice(6));
+        if (onEvent) {
+          onEvent(data);
+        }
+        if (data.type === "done") {
+          finalResult = {
+            ok: true,
+            totalChecked: data.totalChecked || 0,
+            fixedCount: data.fixedCount || 0,
+            updatedPapers: data.updatedPapers || [],
+            restrictedLinks: data.restrictedLinks || [],
+          };
+        } else if (data.type === "error") {
+          finalResult = {
+            ok: false,
+            totalChecked: 0,
+            fixedCount: 0,
+            updatedPapers: [],
+            restrictedLinks: [],
+            error: data.message,
+          };
+        }
+      } catch (e) {
+        console.error("Failed to parse SSE event:", e);
+      }
+    }
+  };
+
   while (true) {
     const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n\n");
-    // Keep the last partial line in the buffer
-    buffer = lines.pop() || "";
-
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        try {
-          const data: AuditProgressUpdate = JSON.parse(line.slice(6));
-          if (onEvent) {
-            onEvent(data);
-          }
-          if (data.type === "done") {
-            finalResult = {
-              ok: true,
-              totalChecked: data.totalChecked || 0,
-              fixedCount: data.fixedCount || 0,
-              updatedPapers: data.updatedPapers || [],
-              restrictedLinks: data.restrictedLinks || [],
-            };
-          } else if (data.type === "error") {
-            finalResult = {
-              ok: false,
-              totalChecked: 0,
-              fixedCount: 0,
-              updatedPapers: [],
-              restrictedLinks: [],
-              error: data.message,
-            };
-          }
-        } catch (e) {
-          console.error("Failed to parse SSE event:", e);
+    if (value) {
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      // Keep the last partial line in the buffer
+      buffer = lines.pop() || "";
+      for (const l of lines) {
+        processSSELine(l);
+      }
+    }
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        const lines = buffer.split("\n\n");
+        for (const l of lines) {
+          processSSELine(l);
         }
       }
+      break;
     }
   }
 
