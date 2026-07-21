@@ -4,7 +4,7 @@ import { getSupabaseAdmin, supabase } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import type { AuthenticatedRequest, ExtractionResult } from "../types.js";
-import { localExtract, ocrViaTesseract } from "./extract.js";
+import { localExtract, ocrViaTesseract, needsAi, runAiExtraction } from "./extract.js";
 import { z } from "zod";
 
 const router = Router();
@@ -510,6 +510,10 @@ router.post(
               }
 
               extracted = await localExtract(localText, sourceName);
+
+              if (needsAi(extracted)) {
+                extracted = await runAiExtraction(buffer, localText, extracted);
+              }
             } catch (err) {
               console.error(`Extraction failed for paper ${p.id}:`, err);
             }

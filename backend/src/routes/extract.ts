@@ -382,6 +382,86 @@ export function mergeResults(local: ExtractionResult, api: ExtractionResult): Ex
 }
 
 /**
+ * Execute AI Extraction (Gemini API or Lovable Gateway) when local heuristics need AI.
+ */
+export async function runAiExtraction(
+  pdfBuffer: Buffer | null,
+  localText: string,
+  localResult: ExtractionResult
+): Promise<ExtractionResult> {
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.LOVABLE_API_KEY;
+  if (!geminiApiKey && !apiKey) return localResult;
+
+  try {
+    const highConfFields = getHighConfFields(localResult);
+    const sendTextOnly = Boolean(localText && localText.trim().length >= 150);
+    let raw = "";
+
+    if (geminiApiKey) {
+      const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
+      const prompt = sendTextOnly
+        ? `${SYSTEM_PROMPT}\n\nYou are given the text of an engineering question paper and high-confidence fields: ${JSON.stringify(highConfFields)}. Extract all remaining fields accurately. Text:\n${localText}`
+        : `${SYSTEM_PROMPT}\n\nHere are already extracted high-confidence fields: ${JSON.stringify(highConfFields)}. Extract the remaining fields from the attached PDF.`;
+
+      const contents = sendTextOnly || !pdfBuffer
+        ? [{ role: "user", parts: [{ text: prompt }] }]
+        : [{
+            role: "user",
+            parts: [
+              { inlineData: { mimeType: "application/pdf", data: pdfBuffer.toString("base64") } },
+              { text: prompt }
+            ]
+          }];
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents, generationConfig: { responseMimeType: "application/json" } })
+      });
+
+      if (response.ok) {
+        const body = (await response.json()) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        };
+        raw = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      }
+    } else if (apiKey) {
+      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Lovable-API-Key": apiKey },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-pro",
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: `Extract remaining fields. High confidence values: ${JSON.stringify(highConfFields)}. Text:\n${localText}` }
+          ],
+          response_format: { type: "json_object" }
+        })
+      });
+      if (response.ok) {
+        const body = (await response.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        raw = body.choices?.[0]?.message?.content ?? "";
+      }
+    }
+
+    if (raw) {
+      const apiResult = parseExtraction(raw);
+      if (apiResult) {
+        return mergeResults(localResult, apiResult);
+      }
+    }
+  } catch (err) {
+    console.error("AI extraction error in runAiExtraction:", err);
+  }
+
+  return localResult;
+}
+
+/**
  * localExtract performs regular expression matches and database checks on extracted plain text
  */
 export const SUBJECTS_ALIASES: Record<string, string> = {
