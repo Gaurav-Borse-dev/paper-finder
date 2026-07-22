@@ -724,15 +724,14 @@ async function processQueue(jobId: string, googleAccessToken: string) {
         let downloadSkipped = false;
 
         try {
-          // ===== FAST PATH: Check if filename + folder path yield high-confidence metadata =====
+          // ===== FAST PATH: Check if filename + folder path yield recognized subject & metadata =====
           const fastPathResult = await localExtract("", item.name, item.path);
-          const fastConf = avgConfidence(fastPathResult);
-          const isFastPathHighConf =
-            fastConf >= 0.75 &&
+          const isFastPathSufficient =
             fastPathResult.subject.value !== null &&
-            fastPathResult.subject.value !== "Unknown Subject";
+            fastPathResult.subject.value !== "Unknown Subject" &&
+            (fastPathResult.subject.confidence ?? 0) >= 0.70;
 
-          if (isFastPathHighConf) {
+          if (isFastPathSufficient) {
             finalResult = fastPathResult;
             downloadSkipped = true;
           } else {
@@ -800,9 +799,16 @@ async function processQueue(jobId: string, googleAccessToken: string) {
             // Full local extraction with text + filename + folder path
             finalResult = await localExtract(localText, item.name, item.path);
 
-            // Level 4 OCR fallback if text is extremely short (< 100 chars)
-            if (localText.trim().length < 100 && fileBuffer) {
-              console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
+            // Level 4 OCR fallback ONLY if subject is completely unknown or confidence < 0.60
+            const needsOcr =
+              (!finalResult.subject.value ||
+               finalResult.subject.value === "Unknown Subject" ||
+               (finalResult.subject.confidence ?? 0) < 0.60) &&
+              localText.trim().length < 100 &&
+              fileBuffer;
+
+            if (needsOcr && fileBuffer) {
+              console.log(`[OCR] Scanned PDF with unknown subject detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
               try {
                 const ocrText = await ocrViaTesseract(fileBuffer);
                 if (ocrText && ocrText.trim().length >= 50) {
