@@ -600,8 +600,8 @@ async function processQueue(jobId: string, googleAccessToken: string) {
 
     // ===== Optimized Queue Setup =====
     const pendingQueue = [...items];
-    const concurrencyLimit = 5; // Up from 2
-    const geminiSemaphoreMax = 2; // Limit concurrent Gemini calls
+    const concurrencyLimit = 15; // Up from 5 for maximum throughput
+    const geminiSemaphoreMax = 3; // Limit concurrent Gemini calls
     let geminiActiveCount = 0;
     const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -724,82 +724,95 @@ async function processQueue(jobId: string, googleAccessToken: string) {
         let downloadSkipped = false;
 
         try {
-          // ===== PHASE 2: Download + Text Extraction (Always download to ensure accuracy) =====
-          if (googleAccessToken) {
-            try {
-              const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
-              const downloadRes = await fetchWithRetry(downloadUrl, {
-                headers: { Authorization: `Bearer ${googleAccessToken}` },
-                timeoutMs: 30000,
-              });
-              if (downloadRes.ok) {
-                const arrayBuffer = await downloadRes.arrayBuffer();
-                fileBuffer = Buffer.from(arrayBuffer);
-              }
-            } catch (dlErr: any) {
-              console.warn(`[processQueue] Direct Google API download failed for ${item.name} (${item.file_id}):`, dlErr.message);
-            }
-          }
+          // ===== FAST PATH: Check if filename + folder path yield high-confidence metadata =====
+          const fastPathResult = await localExtract("", item.name, item.path);
+          const fastConf = avgConfidence(fastPathResult);
+          const isFastPathHighConf =
+            fastConf >= 0.75 &&
+            fastPathResult.subject.value !== null &&
+            fastPathResult.subject.value !== "Unknown Subject";
 
-          // Fallback 1: Try Google Direct CDN endpoint
-          if (!fileBuffer) {
-            try {
-              const cdnUrl = `https://lh3.googleusercontent.com/d/${item.file_id}`;
-              const cdnRes = await fetchWithRetry(cdnUrl, { timeoutMs: 10000 });
-              if (cdnRes.ok) {
-                const arr = await cdnRes.arrayBuffer();
-                const b = Buffer.from(arr);
-                if (b.length > 500 && b.subarray(0, 4).toString() === "%PDF") {
-                  fileBuffer = b;
+          if (isFastPathHighConf) {
+            finalResult = fastPathResult;
+            downloadSkipped = true;
+          } else {
+            // ===== PHASE 2: Download + Text Extraction (For files requiring deep inspection) =====
+            if (googleAccessToken) {
+              try {
+                const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
+                const downloadRes = await fetchWithRetry(downloadUrl, {
+                  headers: { Authorization: `Bearer ${googleAccessToken}` },
+                  timeoutMs: 30000,
+                });
+                if (downloadRes.ok) {
+                  const arrayBuffer = await downloadRes.arrayBuffer();
+                  fileBuffer = Buffer.from(arrayBuffer);
                 }
+              } catch (dlErr: any) {
+                console.warn(`[processQueue] Direct Google API download failed for ${item.name} (${item.file_id}):`, dlErr.message);
               }
-            } catch (cdnErr) {
-              // CDN fallback failed
             }
-          }
 
-          // Fallback 2: Try export=download endpoint
-          if (!fileBuffer) {
-            try {
-              const dlUrl = `https://drive.google.com/uc?export=download&id=${item.file_id}&confirm=t`;
-              const dlRes = await fetchWithRetry(dlUrl, { timeoutMs: 10000 });
-              if (dlRes.ok) {
-                const arr = await dlRes.arrayBuffer();
-                const b = Buffer.from(arr);
-                if (b.length > 500 && (b.subarray(0, 4).toString() === "%PDF" || b.includes(Buffer.from("%PDF")))) {
-                  fileBuffer = b;
+            // Fallback 1: Try Google Direct CDN endpoint
+            if (!fileBuffer) {
+              try {
+                const cdnUrl = `https://lh3.googleusercontent.com/d/${item.file_id}`;
+                const cdnRes = await fetchWithRetry(cdnUrl, { timeoutMs: 10000 });
+                if (cdnRes.ok) {
+                  const arr = await cdnRes.arrayBuffer();
+                  const b = Buffer.from(arr);
+                  if (b.length > 500 && b.subarray(0, 4).toString() === "%PDF") {
+                    fileBuffer = b;
+                  }
                 }
+              } catch (cdnErr) {
+                // CDN fallback failed
               }
-            } catch (ucErr) {
-              // Public download fallback failed
             }
-          }
 
-          if (!fileBuffer) {
-            throw new Error(`Download failed: Unable to fetch PDF file content from Google Drive (access token may be expired or file restricted).`);
-          }
-
-          // Parse text locally (first 2 pages for metadata coverage)
-          const parser = new PDFParse({ data: fileBuffer });
-          const textData = await parser.getText({ first: 2 });
-          await parser.destroy();
-          localText = textData.text || "";
-
-          // Full local extraction with text + filename + folder path
-          finalResult = await localExtract(localText, item.name, item.path);
-
-          // Level 4 OCR fallback if text is extremely short (< 100 chars)
-          if (localText.trim().length < 100 && fileBuffer) {
-            console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
-            try {
-              const ocrText = await ocrViaTesseract(fileBuffer);
-              if (ocrText && ocrText.trim().length >= 50) {
-                console.log(`[OCR] Tesseract extracted ${ocrText.trim().length} chars for ${item.name}. Re-running local extraction.`);
-                localText = ocrText;
-                finalResult = await localExtract(localText, item.name, item.path);
+            // Fallback 2: Try export=download endpoint
+            if (!fileBuffer) {
+              try {
+                const dlUrl = `https://drive.google.com/uc?export=download&id=${item.file_id}&confirm=t`;
+                const dlRes = await fetchWithRetry(dlUrl, { timeoutMs: 10000 });
+                if (dlRes.ok) {
+                  const arr = await dlRes.arrayBuffer();
+                  const b = Buffer.from(arr);
+                  if (b.length > 500 && (b.subarray(0, 4).toString() === "%PDF" || b.includes(Buffer.from("%PDF")))) {
+                    fileBuffer = b;
+                  }
+                }
+              } catch (ucErr) {
+                // Public download fallback failed
               }
-            } catch (ocrErr) {
-              console.error(`Tesseract OCR failed for ${item.name}:`, ocrErr);
+            }
+
+            if (!fileBuffer) {
+              throw new Error(`Download failed: Unable to fetch PDF file content from Google Drive (access token may be expired or file restricted).`);
+            }
+
+            // Parse text locally (first 2 pages for metadata coverage)
+            const parser = new PDFParse({ data: fileBuffer });
+            const textData = await parser.getText({ first: 2 });
+            await parser.destroy();
+            localText = textData.text || "";
+
+            // Full local extraction with text + filename + folder path
+            finalResult = await localExtract(localText, item.name, item.path);
+
+            // Level 4 OCR fallback if text is extremely short (< 100 chars)
+            if (localText.trim().length < 100 && fileBuffer) {
+              console.log(`[OCR] Scanned PDF detected for ${item.name} (${localText.trim().length} chars). Running local Tesseract OCR...`);
+              try {
+                const ocrText = await ocrViaTesseract(fileBuffer);
+                if (ocrText && ocrText.trim().length >= 50) {
+                  console.log(`[OCR] Tesseract extracted ${ocrText.trim().length} chars for ${item.name}. Re-running local extraction.`);
+                  localText = ocrText;
+                  finalResult = await localExtract(localText, item.name, item.path);
+                }
+              } catch (ocrErr) {
+                console.error(`Tesseract OCR failed for ${item.name}:`, ocrErr);
+              }
             }
           }
         } catch (err: any) {
