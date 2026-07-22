@@ -12,6 +12,99 @@ const router = Router();
 // Track active jobs in memory to prevent duplicate runner instantiation
 const activeJobRunners = new Set<string>();
 
+interface FetchRetryOptions extends RequestInit {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  timeoutMs?: number;
+}
+
+/**
+ * Resilient fetch wrapper that automatically retries transient network errors, socket disconnects
+ * (e.g. UND_ERR_SOCKET, SocketError, ECONNRESET, ETIMEDOUT, fetch failed), rate limits (429), and 
+ * 5xx server errors with exponential backoff and random jitter.
+ * 
+ * Non-retryable status codes like 401 Unauthorized throw immediately with a clear actionable message.
+ */
+async function fetchWithRetry(url: string | URL, options: FetchRetryOptions = {}): Promise<globalThis.Response> {
+  const maxRetries = options.maxRetries ?? 3;
+  const initialDelayMs = options.initialDelayMs ?? 800;
+  const timeoutMs = options.timeoutMs ?? 30000;
+
+  const { maxRetries: _, initialDelayMs: __, timeoutMs: ___, ...fetchInit } = options;
+
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    if (fetchInit.signal) {
+      if (fetchInit.signal.aborted) {
+        controller.abort();
+      } else {
+        fetchInit.signal.addEventListener("abort", () => controller.abort());
+      }
+    }
+
+    try {
+      const response = await fetch(url.toString(), {
+        ...fetchInit,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      // Status 401: Invalid or expired OAuth credentials. Do NOT retry!
+      if (response.status === 401) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(`Google Drive access token expired or invalid (HTTP 401). Please click 'Reconnect Google' to refresh your session. Details: ${errText.slice(0, 150)}`);
+      }
+
+      // Retry transient status codes (429 rate limits, 500/502/503/504 server errors)
+      const transientStatuses = [429, 500, 502, 503, 504];
+      if (transientStatuses.includes(response.status) && attempt <= maxRetries) {
+        const backoffMs = initialDelayMs * Math.pow(2, attempt - 1) + Math.random() * 200;
+        console.warn(`[fetchWithRetry] HTTP ${response.status} for ${url.toString()}. Retrying in ${Math.round(backoffMs)}ms (attempt ${attempt}/${maxRetries})...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+
+      return response;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+
+      // Do not retry explicitly thrown 401 error
+      if (err.message && err.message.includes("HTTP 401")) {
+        throw err;
+      }
+
+      const isAbort = err.name === "AbortError";
+      const isNetworkError =
+        err.name === "TypeError" ||
+        isAbort ||
+        err.code === "UND_ERR_SOCKET" ||
+        err.code === "ECONNRESET" ||
+        err.code === "ETIMEDOUT" ||
+        err.code === "EPIPE" ||
+        (err.cause && (
+          err.cause.code === "UND_ERR_SOCKET" ||
+          err.cause.name === "SocketError" ||
+          (typeof err.cause.message === "string" && err.cause.message.includes("other side closed"))
+        ));
+
+      if (isNetworkError && attempt <= maxRetries) {
+        const backoffMs = initialDelayMs * Math.pow(2, attempt - 1) + Math.random() * 300;
+        console.warn(`[fetchWithRetry] Network/Socket error (${err.message || err.code || err.name}) for ${url.toString()}. Retrying in ${Math.round(backoffMs)}ms (attempt ${attempt}/${maxRetries})...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+
+      throw err;
+    }
+  }
+}
+
+
 function extractFolderId(url: string): string | null {
   if (!url) return null;
   const match = url.match(/\/folders\/([a-zA-Z0-9_-]+)/);
@@ -387,12 +480,13 @@ async function listPdfFilesRecursively(
         url.searchParams.append("pageToken", nextPageToken);
       }
 
-      const response = await fetch(url.toString(), {
+      const response = await fetchWithRetry(url.toString(), {
         headers: { Authorization: `Bearer ${accessToken}` },
+        timeoutMs: 30000,
       });
 
       if (!response.ok) {
-        const errText = await response.text();
+        const errText = await response.text().catch(() => "");
         throw new Error(`Google API returned status ${response.status}: ${errText.slice(0, 150)}`);
       }
 
@@ -631,15 +725,59 @@ async function processQueue(jobId: string, googleAccessToken: string) {
 
         try {
           // ===== PHASE 2: Download + Text Extraction (Always download to ensure accuracy) =====
-          const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
-          const downloadRes = await fetch(downloadUrl, {
-            headers: { Authorization: `Bearer ${googleAccessToken}` },
-          });
-          if (!downloadRes.ok) {
-            throw new Error(`Download failed: ${downloadRes.statusText}`);
+          if (googleAccessToken) {
+            try {
+              const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.file_id}?alt=media`;
+              const downloadRes = await fetchWithRetry(downloadUrl, {
+                headers: { Authorization: `Bearer ${googleAccessToken}` },
+                timeoutMs: 30000,
+              });
+              if (downloadRes.ok) {
+                const arrayBuffer = await downloadRes.arrayBuffer();
+                fileBuffer = Buffer.from(arrayBuffer);
+              }
+            } catch (dlErr: any) {
+              console.warn(`[processQueue] Direct Google API download failed for ${item.name} (${item.file_id}):`, dlErr.message);
+            }
           }
-          const arrayBuffer = await downloadRes.arrayBuffer();
-          fileBuffer = Buffer.from(arrayBuffer);
+
+          // Fallback 1: Try Google Direct CDN endpoint
+          if (!fileBuffer) {
+            try {
+              const cdnUrl = `https://lh3.googleusercontent.com/d/${item.file_id}`;
+              const cdnRes = await fetchWithRetry(cdnUrl, { timeoutMs: 10000 });
+              if (cdnRes.ok) {
+                const arr = await cdnRes.arrayBuffer();
+                const b = Buffer.from(arr);
+                if (b.length > 500 && b.subarray(0, 4).toString() === "%PDF") {
+                  fileBuffer = b;
+                }
+              }
+            } catch (cdnErr) {
+              // CDN fallback failed
+            }
+          }
+
+          // Fallback 2: Try export=download endpoint
+          if (!fileBuffer) {
+            try {
+              const dlUrl = `https://drive.google.com/uc?export=download&id=${item.file_id}&confirm=t`;
+              const dlRes = await fetchWithRetry(dlUrl, { timeoutMs: 10000 });
+              if (dlRes.ok) {
+                const arr = await dlRes.arrayBuffer();
+                const b = Buffer.from(arr);
+                if (b.length > 500 && (b.subarray(0, 4).toString() === "%PDF" || b.includes(Buffer.from("%PDF")))) {
+                  fileBuffer = b;
+                }
+              }
+            } catch (ucErr) {
+              // Public download fallback failed
+            }
+          }
+
+          if (!fileBuffer) {
+            throw new Error(`Download failed: Unable to fetch PDF file content from Google Drive (access token may be expired or file restricted).`);
+          }
 
           // Parse text locally (first 2 pages for metadata coverage)
           const parser = new PDFParse({ data: fileBuffer });

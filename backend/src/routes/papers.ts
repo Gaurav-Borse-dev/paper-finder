@@ -374,16 +374,29 @@ router.post(
       const concurrencyLimit = 5;
       const totalPapers = papers.length;
 
-      const fetchWithTimeout = async (url: string, opts: RequestInit = {}, timeoutMs = 5000) => {
-        const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(), timeoutMs);
-        try {
-          const res = await fetch(url, { ...opts, signal: controller.signal });
-          clearTimeout(id);
-          return res;
-        } catch (e) {
-          clearTimeout(id);
-          throw e;
+      const fetchWithTimeout = async (url: string, opts: RequestInit = {}, timeoutMs = 8000, maxRetries = 2) => {
+        let attempt = 0;
+        while (true) {
+          attempt++;
+          const controller = new AbortController();
+          const id = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const res = await fetch(url, { ...opts, signal: controller.signal });
+            clearTimeout(id);
+            if (res.status === 401) return res;
+            if ([429, 500, 502, 503, 504].includes(res.status) && attempt <= maxRetries) {
+              await new Promise((r) => setTimeout(r, 500 * attempt));
+              continue;
+            }
+            return res;
+          } catch (e: any) {
+            clearTimeout(id);
+            if (attempt <= maxRetries) {
+              await new Promise((r) => setTimeout(r, 500 * attempt));
+              continue;
+            }
+            throw e;
+          }
         }
       };
 

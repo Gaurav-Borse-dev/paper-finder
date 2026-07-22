@@ -771,12 +771,16 @@ function BulkImport() {
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                 <div>
                   <h3 className="text-lg font-bold flex items-center gap-2">
-                    {scanStatus.status === "paused" ? (
+                    {scanStatus.status === "failed" ? (
+                      <AlertCircle className="h-5 w-5 text-destructive" />
+                    ) : scanStatus.status === "paused" ? (
                       <Pause className="h-5 w-5 text-amber-500 animate-pulse" />
                     ) : (
                       <Loader2 className="h-5 w-5 animate-spin text-primary" />
                     )}
-                    {scanStatus.currentStep?.includes("scan_completed")
+                    {scanStatus.status === "failed"
+                      ? "Scan Failed — Action Required"
+                      : scanStatus.currentStep?.includes("scan_completed")
                       ? "Discovery Completed — Awaiting Processing"
                       : scanStatus.currentStep || "Processing subjects..."}
                   </h3>
@@ -822,7 +826,29 @@ function BulkImport() {
                 </div>
               </div>
 
-              {scanStatus.currentStep !== "scan_completed" && (
+              {scanStatus.status === "failed" && (
+                <div className="rounded-xl bg-destructive/10 border border-destructive/20 p-4 text-sm text-destructive flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold block">Scan Job Failed</span>
+                      <span className="text-xs opacity-90">{scanStatus.error || "An error occurred during background scanning."}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {(scanStatus.error?.includes("401") || scanStatus.error?.toLowerCase().includes("token") || scanStatus.error?.toLowerCase().includes("reconnect")) && (
+                      <button
+                        onClick={handleConnectGoogle}
+                        className="flex items-center gap-1.5 rounded-lg bg-destructive text-destructive-foreground px-3 py-1.5 text-xs font-semibold hover:opacity-90 transition-opacity"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" /> Reconnect Google
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {scanStatus.status !== "failed" && scanStatus.currentStep !== "scan_completed" && (
                 <div className="space-y-1">
                   <div className="flex justify-between text-xs font-semibold text-muted-foreground">
                     <span>Extraction Progress</span>
