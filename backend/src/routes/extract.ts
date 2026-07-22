@@ -1379,7 +1379,29 @@ export async function ocrViaGemini(pdfBase64: string): Promise<string> {
   }
 }
 
+let ocrActive = false;
+const ocrQueue: Array<() => void> = [];
+
+const acquireOcrLock = async () => {
+  if (!ocrActive) {
+    ocrActive = true;
+    return;
+  }
+  await new Promise<void>((resolve) => ocrQueue.push(resolve));
+};
+
+const releaseOcrLock = () => {
+  const next = ocrQueue.shift();
+  if (next) {
+    next();
+  } else {
+    ocrActive = false;
+  }
+};
+
 export async function ocrViaTesseract(pdfBuffer: Buffer): Promise<string> {
+  await acquireOcrLock();
+  let worker: any = null;
   try {
     const parser = new PDFParse({ data: pdfBuffer });
     const screenshot = await parser.getScreenshot({ first: 1, imageBuffer: true });
@@ -1395,15 +1417,21 @@ export async function ocrViaTesseract(pdfBuffer: Buffer): Promise<string> {
     }
     
     const buffer = Buffer.from(pageData.data);
-    const worker = await createWorker("eng");
+    worker = await createWorker("eng");
     const { data: { text } } = await worker.recognize(buffer);
     await worker.terminate();
+    worker = null;
     
     console.log(`[OCR] Tesseract successfully extracted ${text.length} chars.`);
     return text;
   } catch (err: any) {
+    if (worker) {
+      await worker.terminate().catch(() => {});
+    }
     console.warn(`[OCR] Local Tesseract OCR failed:`, err.message || err);
     return "";
+  } finally {
+    releaseOcrLock();
   }
 }
 

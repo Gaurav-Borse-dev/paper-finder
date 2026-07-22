@@ -600,8 +600,8 @@ async function processQueue(jobId: string, googleAccessToken: string) {
 
     // ===== Optimized Queue Setup =====
     const pendingQueue = [...items];
-    const concurrencyLimit = 15; // Up from 5 for maximum throughput
-    const geminiSemaphoreMax = 3; // Limit concurrent Gemini calls
+    const concurrencyLimit = 4; // Capped at 4 for Render 512MB RAM tier
+    const geminiSemaphoreMax = 2; // Limit concurrent Gemini calls
     let geminiActiveCount = 0;
     const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
