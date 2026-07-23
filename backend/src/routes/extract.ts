@@ -1594,9 +1594,32 @@ const releaseOcrLock = () => {
   }
 };
 
+let sharedTesseractWorker: any = null;
+
+async function getSharedTesseractWorker() {
+  if (!sharedTesseractWorker) {
+    console.log("[OCR] Initializing singleton Tesseract worker...");
+    sharedTesseractWorker = await createWorker("eng");
+  }
+  return sharedTesseractWorker;
+}
+
 export async function ocrViaTesseract(pdfBuffer: Buffer): Promise<string> {
+  // 1. Try Gemini Vision OCR first if GEMINI_API_KEY is available (0MB local WASM RAM usage)
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const geminiText = await ocrViaGemini(pdfBuffer.toString("base64"));
+      if (geminiText && geminiText.trim().length >= 50) {
+        console.log(`[OCR] Gemini Vision extracted ${geminiText.trim().length} chars.`);
+        return geminiText;
+      }
+    } catch (e) {
+      console.warn("[OCR] Gemini Vision fallback failed, falling back to local Tesseract:", e);
+    }
+  }
+
+  // 2. Fallback to singleton Tesseract worker (reuses 1 WASM instance, constant RAM)
   await acquireOcrLock();
-  let worker: any = null;
   try {
     const parser = new PDFParse({ data: pdfBuffer });
     const screenshot = await parser.getScreenshot({ first: 1, imageBuffer: true });
@@ -1612,17 +1635,12 @@ export async function ocrViaTesseract(pdfBuffer: Buffer): Promise<string> {
     }
     
     const buffer = Buffer.from(pageData.data);
-    worker = await createWorker("eng");
+    const worker = await getSharedTesseractWorker();
     const { data: { text } } = await worker.recognize(buffer);
-    await worker.terminate();
-    worker = null;
     
     console.log(`[OCR] Tesseract successfully extracted ${text.length} chars.`);
     return text;
   } catch (err: any) {
-    if (worker) {
-      await worker.terminate().catch(() => {});
-    }
     console.warn(`[OCR] Local Tesseract OCR failed:`, err.message || err);
     return "";
   } finally {
