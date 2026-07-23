@@ -507,6 +507,9 @@ router.post(
             let localText = "";
             let extracted: ExtractionResult | null = null;
 
+            // Use proper filename context for localExtract: prefer storage path, fallback to subject name
+            const extractFilename = sourceName || (p.subject && p.subject !== "Unknown Subject" ? p.subject : undefined);
+
             try {
               if (buffer && buffer.length > 500) {
                 const parser = new PDFParse({ data: buffer });
@@ -522,9 +525,10 @@ router.post(
                 }
               }
 
-              extracted = await localExtract(localText, sourceName);
+              extracted = await localExtract(localText, extractFilename);
 
               if (needsAi(extracted)) {
+                // Always pass the PDF buffer so AI can use multimodal vision
                 extracted = await runAiExtraction(buffer, localText, extracted);
               }
             } catch (err) {
@@ -537,29 +541,57 @@ router.post(
 
               const isUrlLike = (val: any) => typeof val === "string" && (val.toLowerCase().includes("http") || val.toLowerCase().includes("drive.google") || val.toLowerCase().includes("/file/d/") || val.toLowerCase().includes(".com"));
 
-              if (extracted.subject.value && extracted.subject.confidence >= 0.70 && extracted.subject.value !== p.subject && !isUrlLike(extracted.subject.value)) {
+              // Validation helpers
+              const VALID_DEPARTMENTS = [
+                "Computer Engineering", "Information Technology", "Mechanical Engineering",
+                "Civil Engineering", "Electrical Engineering", "Electronics and Telecommunication",
+                "Artificial Intelligence and Machine Learning", "Data Science"
+              ];
+              const VALID_TOTAL_MARKS = new Set([30, 40, 50, 60, 65, 70, 75, 80, 100]);
+              const ACADEMIC_YEAR_REGEX = /^\d{4}-\d{2}$/;
+
+              // Subject — confidence >= 0.80, not a URL
+              if (extracted.subject.value && extracted.subject.confidence >= 0.80 && extracted.subject.value !== p.subject && !isUrlLike(extracted.subject.value)) {
                 updates.subject = extracted.subject.value;
                 changes.push(`Subject: "${p.subject}" ➔ "${extracted.subject.value}"`);
               }
-              if (extracted.department.value && extracted.department.confidence >= 0.70 && extracted.department.value !== p.department) {
-                updates.department = extracted.department.value;
-                changes.push(`Dept: "${p.department}" ➔ "${extracted.department.value}"`);
+              // Department — confidence >= 0.80, must be a known department
+              if (extracted.department.value && extracted.department.confidence >= 0.80 && extracted.department.value !== p.department) {
+                if (VALID_DEPARTMENTS.includes(extracted.department.value)) {
+                  updates.department = extracted.department.value;
+                  changes.push(`Dept: "${p.department}" ➔ "${extracted.department.value}"`);
+                }
               }
-              if (extracted.semester.value && extracted.semester.confidence >= 0.70 && extracted.semester.value !== p.semester) {
-                updates.semester = extracted.semester.value;
-                changes.push(`Sem: ${p.semester} ➔ ${extracted.semester.value}`);
+              // Semester — confidence >= 0.80, must be 1-8
+              if (extracted.semester.value && extracted.semester.confidence >= 0.80 && extracted.semester.value !== p.semester) {
+                const semVal = Number(extracted.semester.value);
+                if (Number.isInteger(semVal) && semVal >= 1 && semVal <= 8) {
+                  updates.semester = semVal;
+                  changes.push(`Sem: ${p.semester} ➔ ${semVal}`);
+                }
               }
-              if (extracted.academic_year.value && extracted.academic_year.confidence >= 0.70 && extracted.academic_year.value !== p.academic_year) {
-                updates.academic_year = extracted.academic_year.value;
-                changes.push(`Year: "${p.academic_year}" ➔ "${extracted.academic_year.value}"`);
+              // Academic Year — confidence >= 0.80, must match YYYY-YY format
+              if (extracted.academic_year.value && extracted.academic_year.confidence >= 0.80 && extracted.academic_year.value !== p.academic_year) {
+                if (ACADEMIC_YEAR_REGEX.test(extracted.academic_year.value)) {
+                  updates.academic_year = extracted.academic_year.value;
+                  changes.push(`Year: "${p.academic_year}" ➔ "${extracted.academic_year.value}"`);
+                }
               }
-              if (extracted.marks.value && extracted.marks.confidence >= 0.70 && extracted.marks.value !== p.marks) {
-                updates.marks = extracted.marks.value;
-                changes.push(`Marks: ${p.marks} ➔ ${extracted.marks.value}`);
+              // Marks — confidence >= 0.80, must be a valid total mark
+              if (extracted.marks.value && extracted.marks.confidence >= 0.80 && extracted.marks.value !== p.marks) {
+                const marksVal = Number(extracted.marks.value);
+                if (VALID_TOTAL_MARKS.has(marksVal)) {
+                  updates.marks = marksVal;
+                  changes.push(`Marks: ${p.marks} ➔ ${marksVal}`);
+                }
               }
-              if (extracted.exam_type.value && extracted.exam_type.confidence >= 0.70 && extracted.exam_type.value !== p.exam_type) {
-                updates.exam_type = extracted.exam_type.value;
-                changes.push(`Type: "${p.exam_type}" ➔ "${extracted.exam_type.value}"`);
+              // Exam Type — confidence >= 0.80
+              if (extracted.exam_type.value && extracted.exam_type.confidence >= 0.80 && extracted.exam_type.value !== p.exam_type) {
+                const validExamTypes = ["ESE", "RE-ESE", "Supplementary", "Complementary"];
+                if (validExamTypes.includes(extracted.exam_type.value)) {
+                  updates.exam_type = extracted.exam_type.value;
+                  changes.push(`Type: "${p.exam_type}" ➔ "${extracted.exam_type.value}"`);
+                }
               }
 
               if (Object.keys(updates).length > 0) {

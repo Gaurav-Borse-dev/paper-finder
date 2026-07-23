@@ -21,11 +21,13 @@ Normalize department (Branch) strictly to one of these exact values:
 - "Electronics and Telecommunication"
 - "Artificial Intelligence and Machine Learning"
 - "Data Science"
-If it is a first year common subject (FY B.Tech / FY ALL), normalize the department to "Computer Engineering" (or look for the branch mentioned in the file/folder name).
+IMPORTANT: Extract the department exactly as printed on the paper header. If the paper says "Department of Information Technology", set department to "Information Technology". If the paper says "FY B.Tech" or "FY ALL" without a specific branch, look for the branch in the filename or folder path provided; if none found, set department to null with confidence 0.
 
 Normalize subject to the full readable subject name in Title Case, using standard conjunctions (e.g. "Data Structures and Algorithms", "Basic Electrical and Electronics Engineering"). Expand abbreviations to their full name if known (e.g., "DSA" -> "Data Structures and Algorithms", "DBMS" -> "Database Management Systems", "OOP" -> "Object Oriented Programming").
 
-Normalize semester to an integer from 1 to 8. Look for roman numerals (I->1, II->2, III->3, IV->4, V->5, VI->6, VII->7, VIII->8).
+Normalize semester to an integer from 1 to 8. Look for explicit semester mentions: "Semester III" -> 3, "Sem-4" -> 4, "SEM VI" -> 6.
+Also check for roman numerals (I->1, II->2, III->3, IV->4, V->5, VI->6, VII->7, VIII->8).
+IMPORTANT: Only extract the semester if it is explicitly stated. Do NOT guess the semester from the year of study alone (FY/SY/TY/BE) unless an ODD/EVEN indicator is also present.
 
 Normalize exam_type to one of: "ESE", "RE-ESE", "Supplementary", "Complementary".
 - "End Semester Examination" / "Regular End Semester" / "Regular ESE" -> "ESE"
@@ -34,8 +36,12 @@ Normalize exam_type to one of: "ESE", "RE-ESE", "Supplementary", "Complementary"
 - "Complementary" -> "Complementary"
 
 Normalize academic_year to "YYYY-YY" (e.g. "2024-25").
+IMPORTANT: The academic_year is the year in which the exam was conducted, NOT the syllabus pattern year. Ignore lines like "Pattern 2019" or "Syllabus 2021". If you see an exam date or session (e.g. "Nov/Dec 2023", "Winter 2023", "May 2024", "Summer 2024"), derive the academic_year from the exam session:
+- Exams in Jul-Dec of year YYYY -> academic_year "YYYY-(YY+1)" (e.g. Nov 2023 -> "2023-24")
+- Exams in Jan-Jun of year YYYY -> academic_year "(YYYY-1)-YY" (e.g. May 2024 -> "2023-24")
+
 Normalize exam_date to ISO "YYYY-MM-DD". Set null if not found.
-marks is the maximum marks integer (e.g. 60, 70, 75, 80, 100).
+marks is the TOTAL / MAXIMUM marks for the entire paper (e.g. 60, 70, 75, 80, 100). Do NOT extract sub-question marks (like "[10 Marks]", "5 marks", "Q1 carries 20 marks"). Only extract the total paper marks from the header.
 subject_code is like "CS601" or "RCP23VCPC301" if present, else null.
 exam_month is the full month name (e.g. "July"). exam_year is the 4-digit year.
 
@@ -325,7 +331,8 @@ router.post(
 
 /**
  * Determine if AI fallback is required.
- * Returns true if any of the core fields are missing or have confidence < 60%.
+ * Returns true if any of the core fields are missing or have confidence < 80%.
+ * Lowered threshold from 0.90 to 0.80 so AI is called more often to verify/correct regex heuristics.
  */
 export function needsAi(r: ExtractionResult): boolean {
   const checkFields: Array<keyof ExtractionResult> = [
@@ -336,16 +343,18 @@ export function needsAi(r: ExtractionResult): boolean {
     "exam_type",
     "marks",
   ];
-  return checkFields.some((f) => !r[f] || r[f].value === null || r[f].confidence < 0.90);
+  return checkFields.some((f) => !r[f] || r[f].value === null || r[f].confidence < 0.80);
 }
 
 /**
- * Filter out fields with confidence >= 0.85 to pass to Gemini API.
+ * Filter out fields with confidence >= 0.95 to pass to Gemini API as pre-locked.
+ * Raised threshold from 0.85 to 0.95 so only truly certain local results are locked.
+ * This prevents wrong regex guesses from being sent as "do not change" to Gemini.
  */
 function getHighConfFields(r: ExtractionResult) {
   const out: Record<string, unknown> = {};
   (Object.keys(r) as Array<keyof ExtractionResult>).forEach((k) => {
-    if (r[k] && r[k].confidence >= 0.85) {
+    if (r[k] && r[k].confidence >= 0.95) {
       out[k] = r[k].value;
     }
   });
@@ -354,7 +363,8 @@ function getHighConfFields(r: ExtractionResult) {
 
 /**
  * Merge local heuristic results and AI results.
- * Respects the constraint: Never overwrite fields that already have high confidence (>= 85%).
+ * AI (Gemini) results are trusted over local regex heuristics when AI has reasonable confidence.
+ * Only truly exact local matches (confidence >= 0.95) are preserved over AI.
  */
 export function mergeResults(local: ExtractionResult, api: ExtractionResult): ExtractionResult {
   const merged = { ...local };
@@ -362,14 +372,15 @@ export function mergeResults(local: ExtractionResult, api: ExtractionResult): Ex
     const localField = local[k];
     const apiField = api[k];
     
-    // If the API extracted a field with high confidence (>= 80%), trust the API over local heuristic
-    if (apiField && apiField.value !== null && apiField.confidence >= 0.80) {
+    // If the API extracted a field with confidence >= 0.75, trust the API over local heuristic
+    // This ensures Gemini's actual document analysis overrides regex guesses
+    if (apiField && apiField.value !== null && apiField.confidence >= 0.75) {
       merged[k] = apiField as any;
       return;
     }
     
-    // Keep local if it has >= 85% confidence
-    if (localField && localField.confidence >= 0.85) {
+    // Keep local only if it has very high confidence (>= 0.95, i.e. exact DB match or literal match)
+    if (localField && localField.confidence >= 0.95) {
       return;
     }
     
@@ -395,25 +406,32 @@ export async function runAiExtraction(
 
   try {
     const highConfFields = getHighConfFields(localResult);
-    const sendTextOnly = Boolean(localText && localText.trim().length >= 150);
+    // ALWAYS prefer sending PDF buffer for multimodal vision analysis.
+    // Only fall back to text-only if no PDF buffer is available.
+    const usePdfVision = Boolean(pdfBuffer && pdfBuffer.length > 500);
     let raw = "";
 
     if (geminiApiKey) {
       const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
-      const prompt = sendTextOnly
-        ? `${SYSTEM_PROMPT}\n\nYou are given the text of an engineering question paper and high-confidence fields: ${JSON.stringify(highConfFields)}. Extract all remaining fields accurately. Text:\n${localText}`
-        : `${SYSTEM_PROMPT}\n\nHere are already extracted high-confidence fields: ${JSON.stringify(highConfFields)}. Extract the remaining fields from the attached PDF.`;
+      
+      const highConfNote = Object.keys(highConfFields).length > 0
+        ? `\n\nThese fields were already extracted with very high confidence from exact text matches. You may use them as reference but MUST verify them against the actual document: ${JSON.stringify(highConfFields)}`
+        : "";
+      
+      const prompt = usePdfVision
+        ? `${SYSTEM_PROMPT}${highConfNote}\n\nExtract ALL fields from the attached PDF document. Analyze the header area carefully for department, semester, marks, academic year, and subject.`
+        : `${SYSTEM_PROMPT}${highConfNote}\n\nExtract all fields from this question paper text. Analyze the header area carefully for department, semester, marks, academic year, and subject.\n\nText:\n${localText}`;
 
-      const contents = sendTextOnly || !pdfBuffer
-        ? [{ role: "user", parts: [{ text: prompt }] }]
-        : [{
+      const contents = usePdfVision
+        ? [{
             role: "user",
             parts: [
-              { inlineData: { mimeType: "application/pdf", data: pdfBuffer.toString("base64") } },
+              { inlineData: { mimeType: "application/pdf", data: pdfBuffer!.toString("base64") } },
               { text: prompt }
             ]
-          }];
+          }]
+        : [{ role: "user", parts: [{ text: prompt }] }];
 
       const response = await fetch(url, {
         method: "POST",
@@ -428,6 +446,16 @@ export async function runAiExtraction(
         raw = body.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
       }
     } else if (apiKey) {
+      const pdfBase64 = usePdfVision ? pdfBuffer!.toString("base64") : "";
+      const content = usePdfVision
+        ? [
+            { type: "text", text: `Extract ALL fields from the attached PDF. Verify every field carefully.\n\nHigh confidence reference values (verify against document): ${JSON.stringify(highConfFields)}` },
+            { type: "file", file: { filename: "paper.pdf", file_data: `data:application/pdf;base64,${pdfBase64}` } }
+          ]
+        : [
+            { type: "text", text: `Extract remaining fields. High confidence values: ${JSON.stringify(highConfFields)}. Text:\n${localText}` }
+          ];
+      
       const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Lovable-API-Key": apiKey },
@@ -435,7 +463,7 @@ export async function runAiExtraction(
           model: "google/gemini-2.5-pro",
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: `Extract remaining fields. High confidence values: ${JSON.stringify(highConfFields)}. Text:\n${localText}` }
+            { role: "user", content }
           ],
           response_format: { type: "json_object" }
         })
@@ -610,30 +638,37 @@ export const SUBJECTS_ALIASES: Record<string, string> = {
   "DSD": "Digital System Design",
   "ECD": "Electronic Circuit Design",
 
-  // Graphics / Physics / Chemistry
+  // Graphics / Physics / Chemistry / Core Sciences
   "EG": "Engineering Graphics",
   "GP": "Graphics",
   "GRAPHICS": "Engineering Graphics",
+  "GRAPHICE": "Engineering Graphics",
   "ENGG CHEMISTRY": "Engineering Chemistry",
   "ENGG. CHEM": "Engineering Chemistry",
+  "ENGG. CHEMISTRY": "Engineering Chemistry",
   "ENGG. PHYSICS": "Engineering Physics",
+  "ENGG PHYSICS": "Engineering Physics",
   "Engg. Physics": "Engineering Physics",
   "Engg. Chemistry": "Engineering Chemistry",
   "PHYSICS": "Engineering Physics",
+  "PHY": "Engineering Physics",
   "CHEMISTRY": "Engineering Chemistry",
+  "CHEM": "Engineering Chemistry",
+  "CHEM -II": "Engineering Chemistry II",
+  "CHEM-II": "Engineering Chemistry II",
   "Mechanics": "Engineering Mechanics",
   "Comp Engg. Mechanics": "Computational Engineering Mechanics",
 
-  // Misc
+  // Misc & Common Abbreviations
   "RM": "Research Methodology",
   "UHV": "Universal Human Values",
   "PLCM": "Product Lifecycle Management",
   "IPR": "Intellectual Property Rights",
-  "PFM": "Personal Financial Management",
+  "PFM": "Personal Finance Management",
   "BCM": "Business Communication and Management",
   "CT": "Communication Techniques",
   "CTAK": "Communication Techniques",
-  "SPC": "Structured Programming using C",
+  "SPC": "Statistical Process Control",
   "RFC": "Reinforced Concrete Construction",
   "E&WP": "Environmental and Water Pollution",
   "IC": "Internal Combustion Engines",
@@ -644,19 +679,49 @@ export const SUBJECTS_ALIASES: Record<string, string> = {
   "QBM": "Quantitative Business Methods",
   "PROB & STAT": "Probability and Statistics",
   "Software Engg.": "Software Engineering",
-  "MFEE": "Mathematics for Electrical Engineering"
+  "MFEE": "Mathematics for Electrical Engineering",
+  "CP": "Computer Programming",
+  "EN": "Environmental Studies",
+  "ENV": "Environmental Studies",
+  "ESC": "Engineering Science",
+  "EFM": "Engineering Fluid Mechanics",
+  "RAC": "Refrigeration and Air Conditioning",
+  "EMI": "Electrical Measurements and Instrumentation",
+  "C N": "Computer Networks",
+  "ACD": "Analog and Computer Circuits",
+  "ELEMENT CIVIL ENGG": "Elements of Civil Engineering"
 };
 
-const DEPT_ABBRS: Record<string, string[]> = {
-  "Computer Engineering": ["cse", "computer engineering", "comp eng", "comp. eng.", "comp engg", "comp. engg.", "computer", "computer sci", "computer science", "comp"],
-  "Information Technology": ["it", "information technology", "infotech", "info tech", "info. tech.", "inf. tech."],
-  "Mechanical Engineering": ["mech", "mechanical", "mechanical engineering", "mech eng", "mech. eng.", "mech engg", "mech. engg.", "me"],
-  "Civil Engineering": ["civil", "civil engineering", "ce", "civil eng", "civil engg", "civil. engg."],
-  "Electrical Engineering": ["electrical", "electrical engineering", "elect", "ee", "elect eng", "elect engg", "elect. eng.", "elect. engg."],
+// Full department name matches (always safe to match anywhere in text)
+const DEPT_FULL_NAMES: Record<string, string[]> = {
+  "Computer Engineering": ["computer engineering", "computer science", "computer science and engineering"],
+  "Information Technology": ["information technology"],
+  "Mechanical Engineering": ["mechanical engineering"],
+  "Civil Engineering": ["civil engineering"],
+  "Electrical Engineering": ["electrical engineering"],
+  "Electronics and Telecommunication": ["electronics and telecommunication", "electronics & telecommunication", "electronics and communication", "electronics & communication"],
+  "Artificial Intelligence and Machine Learning": ["artificial intelligence and machine learning", "artificial intelligence & machine learning"],
+  "Data Science": ["data science"],
+};
+
+// Short abbreviations that REQUIRE header context (e.g., "Dept of IT", "Branch: Mech")
+// These are NOT safe to match as bare words in general text.
+const DEPT_CONTEXT_ABBRS: Record<string, string[]> = {
+  "Computer Engineering": ["cse", "comp eng", "comp. eng.", "comp engg", "comp. engg.", "comp"],
+  "Information Technology": ["it", "infotech", "info tech", "info. tech.", "inf. tech."],
+  "Mechanical Engineering": ["mech", "mechanical", "mech eng", "mech. eng.", "mech engg", "mech. engg.", "me"],
+  "Civil Engineering": ["civil", "ce", "civil eng", "civil engg", "civil. engg."],
+  "Electrical Engineering": ["electrical", "elect", "ee", "elect eng", "elect engg", "elect. eng.", "elect. engg."],
   "Electronics and Telecommunication": ["entc", "e&tc", "etc", "et&c", "electronics", "telecommunication", "ece", "extc", "e & tc", "e.t.c.", "e.n.t.c."],
   "Artificial Intelligence and Machine Learning": ["aiml", "ai & ml", "ai/ml", "artificial intelligence", "ai and ml", "ai-ml"],
-  "Data Science": ["aids", "data science", "cseds", "ds", "ai & ds", "ai&ds", "ai-ds"],
+  "Data Science": ["aids", "cseds", "ds", "ai & ds", "ai&ds", "ai-ds"],
 };
+
+// Combined for backward compatibility in filename parsing (filenames are structured, less ambiguous)
+const DEPT_ABBRS: Record<string, string[]> = {};
+for (const [dept, fullNames] of Object.entries(DEPT_FULL_NAMES)) {
+  DEPT_ABBRS[dept] = [...fullNames, ...(DEPT_CONTEXT_ABBRS[dept] || [])];
+}
 
 function getLevenshteinDistance(a: string, b: string): number {
   const matrix: number[][] = [];
@@ -741,21 +806,80 @@ function lookupSubjectAlias(str: string, dynamicAliases?: Record<string, string>
 
 function matchDepartment(str: string): string | null {
   const lower = str.toLowerCase();
-  for (const [deptName, abbreviations] of Object.entries(DEPT_ABBRS)) {
+  // 1. Try exact full department name matches (always safe)
+  for (const [deptName, fullNames] of Object.entries(DEPT_FULL_NAMES)) {
     if (lower.includes(deptName.toLowerCase())) {
       return deptName;
     }
-    for (const abbr of abbreviations) {
-      const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
-      if (regex.test(lower)) {
+    for (const fullName of fullNames) {
+      if (lower.includes(fullName)) {
         return deptName;
+      }
+    }
+  }
+  // 2. Try short abbreviations ONLY with header context
+  // Require patterns like: "Dept of IT", "Branch: Mech", "Department: Civil", "B.Tech (CSE)", "B.E. Comp"
+  for (const [deptName, abbreviations] of Object.entries(DEPT_CONTEXT_ABBRS)) {
+    for (const abbr of abbreviations) {
+      const escapedAbbr = abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Match abbreviation when preceded by department-context keywords
+      const contextPatterns = [
+        new RegExp(`(?:dept\.?|department|branch|programme|program|course|b\.?\\s*tech|b\.?\\s*e\.?|diploma|engg?\.?|engineering)\\s*(?:of|:|-|–|\\()?\\s*${escapedAbbr}\\b`, "i"),
+        new RegExp(`\\b${escapedAbbr}\\s*(?:\\)|department|branch|engg?\.?|engineering)`, "i"),
+      ];
+      for (const regex of contextPatterns) {
+        if (regex.test(lower)) {
+          return deptName;
+        }
       }
     }
   }
   return null;
 }
 
-function matchSemester(str: string): number | null {
+/**
+ * Match department in PDF text with context-awareness.
+ * Full names are matched anywhere. Short abbreviations require header context.
+ * Returns the department name and a confidence level.
+ */
+function matchDepartmentInText(text: string): { dept: string; confidence: number } | null {
+  const lower = text.toLowerCase();
+  // 1. Try exact full department name matches (high confidence)
+  for (const [deptName, fullNames] of Object.entries(DEPT_FULL_NAMES)) {
+    if (lower.includes(deptName.toLowerCase())) {
+      return { dept: deptName, confidence: 0.95 };
+    }
+    for (const fullName of fullNames) {
+      if (lower.includes(fullName)) {
+        return { dept: deptName, confidence: 0.95 };
+      }
+    }
+  }
+  // 2. Try short abbreviations with header context (medium-high confidence)
+  for (const [deptName, abbreviations] of Object.entries(DEPT_CONTEXT_ABBRS)) {
+    for (const abbr of abbreviations) {
+      const escapedAbbr = abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const contextPatterns = [
+        new RegExp(`(?:dept\.?|department|branch|programme|program|course|b\.?\\s*tech|b\.?\\s*e\.?|diploma|engg?\.?|engineering)\\s*(?:of|:|-|–|\\()?\\s*${escapedAbbr}\\b`, "i"),
+        new RegExp(`\\b${escapedAbbr}\\s*(?:\\)|department|branch|engg?\.?|engineering)`, "i"),
+      ];
+      for (const regex of contextPatterns) {
+        if (regex.test(lower)) {
+          return { dept: deptName, confidence: 0.85 };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Match semester with confidence level.
+ * Returns { semester, confidence } or null.
+ * Explicit "Sem 3" / "Semester IV" patterns get high confidence.
+ * Year-only (FY/SY/TY/BE) without ODD/EVEN gets LOW confidence (0.30) so AI can verify.
+ */
+function matchSemesterWithConfidence(str: string): { semester: number; confidence: number } | null {
   const romanMap: Record<string, number> = {
     I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8
   };
@@ -764,63 +888,116 @@ function matchSemester(str: string): number | null {
     "1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5, "6th": 6, "7th": 7, "8th": 8,
   };
 
-  // Pattern 1: Sem 3, Semester: 5, SEM-III, SEM_III, SEM – 3, S-III, SEM3, SEM III
-  const semNumRegex = /\b(?:semester|sem|s)\s*[:\-–\_]?\s*([1-8])\b/i;
+  // Pattern 1: Explicit semester number — Sem 3, Semester: 5, SEM-3 (high confidence)
+  // Use 'semester' or 'sem' only (removed bare 's' to avoid false matches like "Question 1 s 1")
+  const semNumRegex = /\b(?:semester|sem)\s*[:\-–\_]?\s*([1-8])\b/i;
   const numMatch = str.match(semNumRegex);
   if (numMatch) {
-    return parseInt(numMatch[1], 10);
+    return { semester: parseInt(numMatch[1], 10), confidence: 0.95 };
   }
 
-  const semRomanRegex = /\b(?:semester|sem|s)\s*[:\-–\_]?\s*(VIII|VII|VI|IV|V|III|II|I)\b/i;
+  // Pattern 1b: Explicit semester Roman — Sem III, Semester-IV (high confidence)
+  const semRomanRegex = /\b(?:semester|sem)\s*[:\-–\_]?\s*(VIII|VII|VI|IV|V|III|II|I)\b/i;
   const romanMatch = str.match(semRomanRegex);
   if (romanMatch) {
-    return romanMap[romanMatch[1].toUpperCase()] || null;
+    const val = romanMap[romanMatch[1].toUpperCase()];
+    if (val) return { semester: val, confidence: 0.95 };
   }
 
-  // Direct Roman numeral pattern like SEM-III, SEM_III, SEMIII
+  // Direct joined pattern: SEM-III, SEM_III, SEMIII (high confidence)
   const semRomanDirectRegex = /\bSEM[\-\_]?(VIII|VII|VI|IV|V|III|II|I)\b/i;
   const directRomanMatch = str.match(semRomanDirectRegex);
   if (directRomanMatch) {
-    return romanMap[directRomanMatch[1].toUpperCase()] || null;
+    const val = romanMap[directRomanMatch[1].toUpperCase()];
+    if (val) return { semester: val, confidence: 0.95 };
   }
 
-  // Pattern 2: "Third Semester", "3rd Semester", "1st Sem"
+  // Pattern 2: "Third Semester", "3rd Semester", "1st Sem" (high confidence)
   const ordinalSemRegex = /\b(first|second|third|fourth|fifth|sixth|seventh|eighth|1st|2nd|3rd|4th|5th|6th|7th|8th)\s+(?:semester|sem)\b/i;
   const ordinalMatch = str.match(ordinalSemRegex);
   if (ordinalMatch) {
-    return ordinalMap[ordinalMatch[1].toLowerCase()] || null;
+    const val = ordinalMap[ordinalMatch[1].toLowerCase()];
+    if (val) return { semester: val, confidence: 0.95 };
   }
 
-  // Pattern 3: Year prefix to semester range (use ODD/EVEN to pick exact semester)
+  // Pattern 3: Year prefix + ODD/EVEN (medium confidence since we're inferring)
   const isOdd = /\bODD\b/i.test(str);
   const isEven = /\bEVEN\b/i.test(str);
+  const hasOddEven = isOdd || isEven;
 
-  // FY / F.Y. / F.E. / FE / First Year / FY B.Tech → Sem 1 (ODD) or 2 (EVEN)
+  // FY / F.Y. / F.E. / FE / First Year / FY B.Tech
   if (/\b(?:FY|F\.?\s?Y\.?|F\.?\s?E\.?|FE|first\s*year|fy\s*b\.?\s*tech)\b/i.test(str)) {
-    return isEven ? 2 : 1;
+    if (hasOddEven) return { semester: isEven ? 2 : 1, confidence: 0.85 };
+    // Year-only without ODD/EVEN: LOW confidence so AI determines exact semester
+    return { semester: 1, confidence: 0.30 };
   }
-  // SY / S.Y. / S.E. / SE / Second Year → Sem 3 (ODD) or 4 (EVEN)
-  if (/\b(?:SY|S\.?\s?Y\.?|S\.?\s?E\.?|SE|second\s*year|sy\s*b\.?\s*tech)\b/i.test(str)) {
-    return isEven ? 4 : 3;
+  // SY / S.Y. / S.E. / Second Year (avoid bare "SE" as it matches too many things)
+  if (/\b(?:SY|S\.?\s?Y\.?|S\.?\s?E\.?|second\s*year|sy\s*b\.?\s*tech)\b/i.test(str)) {
+    if (hasOddEven) return { semester: isEven ? 4 : 3, confidence: 0.85 };
+    return { semester: 3, confidence: 0.30 };
   }
-  // TY / T.Y. / T.E. / TE / Third Year → Sem 5 (ODD) or 6 (EVEN)
-  if (/\b(?:TY|T\.?\s?Y\.?|T\.?\s?E\.?|TE|third\s*year|ty\s*b\.?\s*tech)\b/i.test(str)) {
-    return isEven ? 6 : 5;
+  // TY / T.Y. / T.E. / Third Year (avoid bare "TE")
+  if (/\b(?:TY|T\.?\s?Y\.?|T\.?\s?E\.?|third\s*year|ty\s*b\.?\s*tech)\b/i.test(str)) {
+    if (hasOddEven) return { semester: isEven ? 6 : 5, confidence: 0.85 };
+    return { semester: 5, confidence: 0.30 };
   }
-  // BE / B.E. / Final Year / Final → Sem 7 (ODD) or 8 (EVEN)
-  if (/\b(?:BE|B\.?\s?E\.?|final\s*year|final|be\s*b\.?\s*tech)\b/i.test(str)) {
-    return isEven ? 8 : 7;
+  // BE / B.E. / Final Year / Final
+  if (/\b(?:final\s*year|final\s*b\.?\s*tech)\b/i.test(str)) {
+    if (hasOddEven) return { semester: isEven ? 8 : 7, confidence: 0.85 };
+    return { semester: 7, confidence: 0.30 };
   }
 
   return null;
 }
 
+// Backward compatible wrapper that returns just the semester number
+function matchSemester(str: string): number | null {
+  const result = matchSemesterWithConfidence(str);
+  return result ? result.semester : null;
+}
+
 function matchAcademicYear(str: string): string | null {
-  const yearRegex = /\b(20\d{2})\s*-\s*(20)?(\d{2})\b/;
-  const match = str.match(yearRegex);
+  // Skip syllabus/pattern year declarations
+  const cleanedStr = str
+    .replace(/\b(?:pattern|syllabus|curriculum|scheme)\s*[:\-]?\s*(20\d{2}(?:\s*-\s*(?:20)?\d{2})?)\b/gi, "")
+    .replace(/\b(?:as\s+per|w\.?e\.?f\.?)\s*[:\-]?\s*(20\d{2}(?:\s*-\s*(?:20)?\d{2})?)\b/gi, "");
+
+  // Try explicit academic year range (e.g., "2023-24", "2024-2025")
+  const yearRegex = /\b(?:academic\s*year|a\.?\s*y\.?|session)?\s*[:\-]?\s*(20\d{2})\s*-\s*(20)?(\d{2})\b/i;
+  const match = cleanedStr.match(yearRegex);
   if (match) {
     return `${match[1]}-${match[3]}`;
   }
+
+  // Try to infer from exam session/month (e.g., "Nov/Dec 2023" -> "2023-24", "May 2024" -> "2023-24")
+  const monthNames: Record<string, number> = {
+    january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+    july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+    jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+    winter: 11, summer: 5, odd: 11, even: 5,
+  };
+
+  // Match patterns like "Nov/Dec 2023", "Winter 2023", "May 2024", "Summer 2024"
+  const sessionRegex = /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|Winter|Summer|Odd|Even)\s*(?:\/\s*(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?))??\s*[,\-]?\s*(20\d{2})\b/i;
+  const sessionMatch = cleanedStr.match(sessionRegex);
+  if (sessionMatch) {
+    const monthKey = sessionMatch[1].toLowerCase();
+    const year = parseInt(sessionMatch[2], 10);
+    const monthNum = monthNames[monthKey];
+    if (monthNum) {
+      // Jul-Dec exams belong to academic year YYYY-(YY+1)
+      // Jan-Jun exams belong to academic year (YYYY-1)-YY
+      if (monthNum >= 7) {
+        const nextYear = (year + 1) % 100;
+        return `${year}-${nextYear.toString().padStart(2, "0")}`;
+      } else {
+        const prevYear = year - 1;
+        const shortYear = year % 100;
+        return `${prevYear}-${shortYear.toString().padStart(2, "0")}`;
+      }
+    }
+  }
+
   return null;
 }
 
@@ -847,20 +1024,21 @@ function matchExamType(str: string): "ESE" | "RE-ESE" | "Supplementary" | "Compl
 }
 
 function matchMarks(str: string): number | null {
-  // Only match marks when preceded by explicit marks keywords — never match bare numbers
+  // ONLY match total paper marks from header context. Never match sub-question marks.
+  // Valid standard total marks: 30, 40, 50, 60, 65, 70, 75, 80, 100
+  const VALID_TOTAL_MARKS = new Set([30, 40, 50, 60, 65, 70, 75, 80, 100]);
+  
   const marksPatterns = [
+    // "Max. Marks: 60", "Maximum Marks: 80", "Total Marks: 100", "Full Marks: 70"
     /\b(?:max\.?\s*marks|maximum\s+marks|total\s+marks|full\s+marks)\s*[:\-–]?\s*(\d{2,3})\b/i,
-    /\bmarks\s*[:\-–]?\s*(\d{2,3})\b/i,
-    /\b(\d{2,3})\s*(?:marks|m(?:arks)?)\b/i,
+    // "Marks: 60" (bare "Marks:" in header context)
+    /\bmarks\s*[:\-–]\s*(\d{2,3})\b/i,
   ];
   for (const regex of marksPatterns) {
     const match = str.match(regex);
     if (match) {
       const val = parseInt(match[1], 10);
-      if ([50, 60, 65, 70, 75, 80, 100].includes(val)) {
-        return val;
-      }
-      if (val >= 20 && val <= 200) {
+      if (VALID_TOTAL_MARKS.has(val)) {
         return val;
       }
     }
@@ -897,9 +1075,9 @@ export function parseFromFilename(filename: string, dynamicAliases?: Record<stri
     result.department = { value: matchedDept, confidence: 0.85 };
   }
 
-  const matchedSem = matchSemester(fnClean);
-  if (matchedSem) {
-    result.semester = { value: matchedSem, confidence: 0.85 };
+  const semResult = matchSemesterWithConfidence(fnClean);
+  if (semResult) {
+    result.semester = { value: semResult.semester, confidence: Math.min(semResult.confidence, 0.85) };
   }
 
   const matchedYear = matchAcademicYear(fnClean);
@@ -1040,10 +1218,12 @@ export async function localExtract(text: string, filename?: string, folderPath?:
   const textResult: ExtractionResult = JSON.parse(JSON.stringify(EMPTY_RESULT));
 
   // -- Department --
+  // Use context-aware department matching that avoids false positives from common words
   try {
     const { data: depts } = await supabase.from("departments").select("name");
     if (depts && depts.length > 0) {
       let matchedDept = null;
+      // First: Try exact full department name match in PDF text (highest confidence)
       for (const d of depts) {
         const dName = d.name.toLowerCase().trim();
         if (textToScan.toLowerCase().includes(dName)) {
@@ -1053,20 +1233,19 @@ export async function localExtract(text: string, filename?: string, folderPath?:
         }
       }
 
+      // Second: Use context-aware abbreviation matching (requires header context like "Dept of", "Branch:")
       if (!matchedDept) {
-        for (const d of depts) {
-          const abbrs = DEPT_ABBRS[d.name];
-          if (abbrs) {
-            for (const abbr of abbrs) {
-              const regex = new RegExp(`\\b${abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "i");
-              if (regex.test(textToScan)) {
-                matchedDept = d.name;
-                textResult.department = { value: d.name, confidence: 0.85 }; // Abbreviation match in PDF text
-                break;
-              }
-            }
+        const deptMatch = matchDepartmentInText(textToScan);
+        if (deptMatch) {
+          // Verify the matched department exists in DB
+          const dbDept = depts.find(d => d.name.toLowerCase() === deptMatch.dept.toLowerCase());
+          if (dbDept) {
+            matchedDept = dbDept.name;
+            textResult.department = { value: dbDept.name, confidence: deptMatch.confidence };
+          } else {
+            matchedDept = deptMatch.dept;
+            textResult.department = { value: deptMatch.dept, confidence: deptMatch.confidence * 0.9 };
           }
-          if (matchedDept) break;
         }
       }
     }
@@ -1074,16 +1253,16 @@ export async function localExtract(text: string, filename?: string, folderPath?:
     console.error("Local dept query failed:", e);
   }
 
-  // -- Semester -- (use the improved matchSemester function)
-  const matchedSemFromText = matchSemester(normalizedText);
-  if (matchedSemFromText) {
-    textResult.semester = { value: matchedSemFromText, confidence: 0.90 };
+  // -- Semester -- (use confidence-aware matchSemesterWithConfidence)
+  const semResult = matchSemesterWithConfidence(normalizedText);
+  if (semResult) {
+    textResult.semester = { value: semResult.semester, confidence: semResult.confidence };
   }
 
-  // -- Academic Year --
-  const yearMatch = normalizedText.match(/\b(20\d{2})\s*-\s*(20)?(\d{2})\b/);
-  if (yearMatch) {
-    textResult.academic_year = { value: `${yearMatch[1]}-${yearMatch[3]}`, confidence: 0.90 };
+  // -- Academic Year -- (use improved matchAcademicYear that skips syllabus patterns)
+  const matchedYear = matchAcademicYear(normalizedText);
+  if (matchedYear) {
+    textResult.academic_year = { value: matchedYear, confidence: 0.90 };
   }
 
   // -- Exam Type --
