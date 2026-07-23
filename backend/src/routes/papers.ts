@@ -370,8 +370,8 @@ router.post(
       const updatedPapers: Array<{ id: string; subject: string; changes: string[] }> = [];
       const restrictedLinks: Array<{ id: string; subject: string; url: string }> = [];
 
-      // Concurrency Limit: 5 workers to prevent Google Drive IP throttling on cloud servers
-      const concurrencyLimit = 5;
+      // Concurrency Limit: 1 worker to stay strictly under Render 512MB RAM free-tier memory limits
+      const concurrencyLimit = 1;
       const totalPapers = papers.length;
 
       const fetchWithTimeout = async (url: string, opts: RequestInit = {}, timeoutMs = 8000, maxRetries = 2) => {
@@ -641,6 +641,7 @@ router.post(
               }
             }
 
+            buffer = null;
             checkedCount++;
             sendEvent("progress", {
               checked: checkedCount,
