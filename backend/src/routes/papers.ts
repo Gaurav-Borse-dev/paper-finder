@@ -405,7 +405,24 @@ router.post(
         const chunk = papers.slice(i, i + concurrencyLimit);
         await Promise.all(
           chunk.map(async (p) => {
-            const isCorruptedSubject = p.subject && (p.subject.toLowerCase().includes("http") || p.subject.toLowerCase().includes("drive.google") || p.subject.toLowerCase().includes("/file/d/"));
+            const checkCorruptedSubject = (subj: string | null | undefined): boolean => {
+              if (!subj) return true;
+              const s = subj.trim();
+              const lower = s.toLowerCase();
+              if (s === "Unknown Subject" || lower.includes("http") || lower.includes("drive.google") || lower.includes("/file/d/") || lower.includes(".com")) {
+                return true;
+              }
+              if (lower.startsWith("papers/") || lower.startsWith("synoptics")) {
+                return true;
+              }
+              const clean = s.replace(/^papers\//i, "").trim();
+              if (/^[0-9a-f]{8}[-_\s][0-9a-f]{4}/i.test(clean) || /^[0-9a-f-]{36}$/i.test(clean)) {
+                return true;
+              }
+              return false;
+            };
+
+            const isCorruptedSubject = checkCorruptedSubject(p.subject);
             const isPerfect =
               !isCorruptedSubject &&
               p.subject && p.subject !== "Unknown Subject" &&
@@ -434,7 +451,7 @@ router.post(
             if (isSupabase) {
               try {
                 const { data: fileData } = await supabaseAdmin.storage
-                  .from("question-papers")
+                  .from(STORAGE_BUCKET)
                   .download(p.question_paper_url);
 
                 if (fileData) {
@@ -595,6 +612,17 @@ router.post(
               }
 
               if (Object.keys(updates).length > 0) {
+                if (extracted) {
+                  updates.extraction_confidence = {
+                    subject: extracted.subject,
+                    department: extracted.department,
+                    semester: extracted.semester,
+                    academic_year: extracted.academic_year,
+                    exam_type: extracted.exam_type,
+                    marks: extracted.marks,
+                  };
+                }
+
                 const { error: updateErr } = await supabaseAdmin
                   .from("papers")
                   .update(updates)
