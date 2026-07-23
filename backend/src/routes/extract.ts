@@ -1129,7 +1129,7 @@ export function parseFromFilename(filename: string, dynamicAliases?: Record<stri
       .trim();
 
     // Clean up and title-case if the candidate looks like a real subject name
-    if (subjectCandidate.length >= 3 && subjectCandidate.length <= 80) {
+    if (subjectCandidate.length >= 3 && subjectCandidate.length <= 180) {
       const lowerCandidate = subjectCandidate.toLowerCase();
       let foundAlias = false;
       for (const fullName of Object.values(SUBJECTS_ALIASES)) {
@@ -1196,12 +1196,25 @@ export async function localExtract(text: string, filename?: string, folderPath?:
   const normalizedText = textToScan.replace(/\s+/g, " ");
 
   // Load learned aliases dynamically from DB
+  const STOP_ALIASES = new Set([
+    "OF", "IN", "FOR", "AND", "THE", "A", "AN", "OR", "WITH", "TO", "AT", "BY", "FROM", "ON", "BE", "AS",
+    "DATA", "ENGG", "CIVIL", "MECH", "ELECT", "ETC", "ENTC", "RCPIT", "SEM", "SEMESTER", "YEAR", "MARKS",
+    "QP", "AK", "SYNOPTICS", "BTECH", "FE", "SE", "TE", "BE", "FY", "SY", "TY", "ALL", "FULL", "SET",
+    "CODE", "NAME", "TITLE", "PAPER", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP",
+    "OCT", "NOV", "DEC", "SOL", "QP-", "GR", "II", "III", "IV", "VI", "VII", "VIII"
+  ]);
+
   const dynamicAliases: Record<string, string> = {};
   try {
     const { data: dbAliases } = await supabase.from("learned_aliases").select("alias, full_name");
     if (dbAliases) {
       for (const item of dbAliases) {
-        dynamicAliases[item.alias.toUpperCase()] = item.full_name;
+        const aliasKey = item.alias.toUpperCase().trim();
+        const fn = item.full_name ? item.full_name.trim() : "";
+        if (STOP_ALIASES.has(aliasKey) || fn.toLowerCase().startsWith("synoptics") || fn.startsWith("Papers/") || fn.startsWith("papers/")) {
+          continue;
+        }
+        dynamicAliases[aliasKey] = fn;
       }
     }
   } catch (err) {
@@ -1223,13 +1236,14 @@ export async function localExtract(text: string, filename?: string, folderPath?:
     const { data: depts } = await supabase.from("departments").select("name");
     if (depts && depts.length > 0) {
       let matchedDept = null;
-      // First: Try exact full department name match in PDF text (highest confidence)
-      for (const d of depts) {
-        const dName = d.name.toLowerCase().trim();
-        if (textToScan.toLowerCase().includes(dName)) {
-          matchedDept = d.name;
-          textResult.department = { value: d.name, confidence: 0.95 }; // Exact DB full-name match in PDF text
-          break;
+      if (textToScan.trim().length >= 5) {
+        for (const d of depts) {
+          const dName = d.name.toLowerCase().trim();
+          if (dName.length >= 3 && textToScan.toLowerCase().includes(dName)) {
+            matchedDept = d.name;
+            textResult.department = { value: d.name, confidence: 0.95 }; // Exact DB full-name match in PDF text
+            break;
+          }
         }
       }
 
@@ -1379,12 +1393,14 @@ export async function localExtract(text: string, filename?: string, folderPath?:
     const { data: subjects } = await supabase.from("subjects").select("name");
     if (subjects && subjects.length > 0) {
       let matchedSubject = null;
-      for (const s of subjects) {
-        const sName = s.name.toLowerCase().trim();
-        if (textToScan.toLowerCase().includes(sName)) {
-          matchedSubject = s.name;
-          textResult.subject = { value: s.name, confidence: 0.95 }; // Exact DB subject name match in PDF text
-          break;
+      if (textToScan.trim().length >= 5) {
+        for (const s of subjects) {
+          const sName = s.name.toLowerCase().trim();
+          if (sName.length >= 3 && textToScan.toLowerCase().includes(sName)) {
+            matchedSubject = s.name;
+            textResult.subject = { value: s.name, confidence: 0.95 }; // Exact DB subject name match in PDF text
+            break;
+          }
         }
       }
 
