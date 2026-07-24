@@ -564,46 +564,101 @@ router.post(
                 "Civil Engineering", "Electrical Engineering", "Electronics and Telecommunication",
                 "Artificial Intelligence and Machine Learning", "Data Science"
               ];
-              const VALID_TOTAL_MARKS = new Set([30, 40, 50, 60, 65, 70, 75, 80, 100]);
-              const ACADEMIC_YEAR_REGEX = /^\d{4}-\d{2}$/;
+              const DEPT_MAP: Record<string, string> = {
+                "electrical": "Electrical Engineering",
+                "electrical engineering": "Electrical Engineering",
+                "entc": "Electronics and Telecommunication",
+                "e&tc": "Electronics and Telecommunication",
+                "electronics & telecommunication": "Electronics and Telecommunication",
+                "electronics and telecommunication": "Electronics and Telecommunication",
+                "mechanical": "Mechanical Engineering",
+                "mechanical engineering": "Mechanical Engineering",
+                "civil": "Civil Engineering",
+                "civil engineering": "Civil Engineering",
+                "computer": "Computer Engineering",
+                "computer engineering": "Computer Engineering",
+                "comp": "Computer Engineering",
+                "it": "Information Technology",
+                "information technology": "Information Technology",
+                "aiml": "Artificial Intelligence and Machine Learning",
+                "ai & ml": "Artificial Intelligence and Machine Learning",
+                "artificial intelligence and machine learning": "Artificial Intelligence and Machine Learning",
+                "aids": "Data Science",
+                "data science": "Data Science",
+                "ds": "Data Science"
+              };
+              const normalizeDept = (dept: string | null | undefined): string | null => {
+                if (!dept) return null;
+                const d = dept.trim();
+                if (VALID_DEPARTMENTS.includes(d)) return d;
+                return DEPT_MAP[d.toLowerCase()] || null;
+              };
 
-              // Subject — confidence >= 0.80, not a URL
-              if (extracted.subject.value && extracted.subject.confidence >= 0.80 && extracted.subject.value !== p.subject && !isUrlLike(extracted.subject.value)) {
+              const isValidAcademicYear = (yearStr: string | null | undefined): boolean => {
+                if (!yearStr) return false;
+                const match = yearStr.trim().match(/^(20\d{2})-(\d{2})$/);
+                if (!match) return false;
+                const startYr = parseInt(match[1], 10);
+                const endYr = parseInt(match[2], 10);
+                return endYr === (startYr + 1) % 100;
+              };
+
+              const VALID_TOTAL_MARKS = new Set([30, 40, 50, 60, 65, 70, 75, 80, 100]);
+              const isCorruptedSubj = isCorruptedSubject;
+              const isUnknownDept = !p.department || p.department === "Unknown" || !VALID_DEPARTMENTS.includes(p.department);
+
+              // Subject — if corrupted, accept confidence >= 0.40; else >= 0.65
+              const minSubjConf = isCorruptedSubj ? 0.40 : 0.65;
+              if (extracted.subject.value && extracted.subject.confidence >= minSubjConf && extracted.subject.value !== p.subject && !isUrlLike(extracted.subject.value)) {
                 updates.subject = extracted.subject.value;
                 changes.push(`Subject: "${p.subject}" ➔ "${extracted.subject.value}"`);
               }
-              // Department — confidence >= 0.80, must be a known department
-              if (extracted.department.value && extracted.department.confidence >= 0.80 && extracted.department.value !== p.department) {
-                if (VALID_DEPARTMENTS.includes(extracted.department.value)) {
-                  updates.department = extracted.department.value;
-                  changes.push(`Dept: "${p.department}" ➔ "${extracted.department.value}"`);
+
+              // Department — normalize abbreviated or missing dept names
+              const minDeptConf = isUnknownDept ? 0.40 : 0.65;
+              if (extracted.department.value && extracted.department.confidence >= minDeptConf) {
+                const norm = normalizeDept(extracted.department.value);
+                if (norm && norm !== p.department) {
+                  updates.department = norm;
+                  changes.push(`Dept: "${p.department}" ➔ "${norm}"`);
                 }
               }
-              // Semester — confidence >= 0.80, must be 1-8
-              if (extracted.semester.value && extracted.semester.confidence >= 0.80 && extracted.semester.value !== p.semester) {
+              if (!updates.department && p.department && !VALID_DEPARTMENTS.includes(p.department)) {
+                const norm = normalizeDept(p.department);
+                if (norm && norm !== p.department) {
+                  updates.department = norm;
+                  changes.push(`Dept Normalized: "${p.department}" ➔ "${norm}"`);
+                }
+              }
+
+              // Semester — confidence >= 0.50, must be 1-8
+              if (extracted.semester.value && extracted.semester.confidence >= 0.50 && extracted.semester.value !== p.semester) {
                 const semVal = Number(extracted.semester.value);
                 if (Number.isInteger(semVal) && semVal >= 1 && semVal <= 8) {
                   updates.semester = semVal;
                   changes.push(`Sem: ${p.semester} ➔ ${semVal}`);
                 }
               }
-              // Academic Year — confidence >= 0.80, must match YYYY-YY format
-              if (extracted.academic_year.value && extracted.academic_year.confidence >= 0.80 && extracted.academic_year.value !== p.academic_year) {
-                if (ACADEMIC_YEAR_REGEX.test(extracted.academic_year.value)) {
+
+              // Academic Year — confidence >= 0.50, must be valid consecutive year
+              if (extracted.academic_year.value && extracted.academic_year.confidence >= 0.50 && extracted.academic_year.value !== p.academic_year) {
+                if (isValidAcademicYear(extracted.academic_year.value)) {
                   updates.academic_year = extracted.academic_year.value;
                   changes.push(`Year: "${p.academic_year}" ➔ "${extracted.academic_year.value}"`);
                 }
               }
-              // Marks — confidence >= 0.80, must be a valid total mark
-              if (extracted.marks.value && extracted.marks.confidence >= 0.80 && extracted.marks.value !== p.marks) {
+
+              // Marks — confidence >= 0.50, must be a valid total mark
+              if (extracted.marks.value && extracted.marks.confidence >= 0.50 && extracted.marks.value !== p.marks) {
                 const marksVal = Number(extracted.marks.value);
                 if (VALID_TOTAL_MARKS.has(marksVal)) {
                   updates.marks = marksVal;
                   changes.push(`Marks: ${p.marks} ➔ ${marksVal}`);
                 }
               }
-              // Exam Type — confidence >= 0.80
-              if (extracted.exam_type.value && extracted.exam_type.confidence >= 0.80 && extracted.exam_type.value !== p.exam_type) {
+
+              // Exam Type — confidence >= 0.50
+              if (extracted.exam_type.value && extracted.exam_type.confidence >= 0.50 && extracted.exam_type.value !== p.exam_type) {
                 const validExamTypes = ["ESE", "RE-ESE", "Supplementary", "Complementary"];
                 if (validExamTypes.includes(extracted.exam_type.value)) {
                   updates.exam_type = extracted.exam_type.value;

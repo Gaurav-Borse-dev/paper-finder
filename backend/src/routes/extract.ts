@@ -1201,7 +1201,15 @@ export async function localExtract(text: string, filename?: string, folderPath?:
     "DATA", "ENGG", "CIVIL", "MECH", "ELECT", "ETC", "ENTC", "RCPIT", "SEM", "SEMESTER", "YEAR", "MARKS",
     "QP", "AK", "SYNOPTICS", "BTECH", "FE", "SE", "TE", "BE", "FY", "SY", "TY", "ALL", "FULL", "SET",
     "CODE", "NAME", "TITLE", "PAPER", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP",
-    "OCT", "NOV", "DEC", "SOL", "QP-", "GR", "II", "III", "IV", "VI", "VII", "VIII"
+    "OCT", "NOV", "DEC", "SOL", "QP-", "GR", "II", "III", "IV", "VI", "VII", "VIII",
+    "POWER", "DESIGN", "AIML", "TECH", "BASIC", "JAVA", "ENG", "SIGNAL", "MATH", "CIVIL",
+    "THEORY", "LINEAR", "CLOUD", "ANALOG", "DISTRI", "COM", "SKILL", "OBJECT", "SYSTEM",
+    "FUND", "IMAGE", "MICRO", "CHEM", "STRUCT", "GE", "STEEL", "ENERGY", "AIR", "THERMO",
+    "MATHS", "MINING", "ARM", "SMART", "RAC", "ACD", "MOBILE", "COMM", "HUMAN", "VALUES",
+    "COMP", "MD", "MODELS", "INTE", "CYBER", "AIDS", "CSEDS", "FYALL", "SEM-I", "USING",
+    "ECE", "GL", "DEEP", "ITS", "AIML-", "SHARMA", "DCMC", "UI", "HIGH", "OOP",
+    "TARKAS", "APPL", "FORMAL", "IYER", "SOCIAL", "RC", "PRIME", "SOLID", "MOVERS",
+    "HSJ", "IT", "VSM", "EFM", "FINAL"
   ]);
 
   const dynamicAliases: Record<string, string> = {};
