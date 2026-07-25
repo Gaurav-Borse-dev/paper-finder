@@ -76,7 +76,10 @@ function Home() {
   const paged = results.slice(0, visible);
 
   const uniqueMarks = useMemo(
-    () => Array.from(new Set((papersQ.data ?? []).map((p) => p.marks))).sort((a, b) => a - b),
+    () =>
+      Array.from(new Set((papersQ.data ?? []).map((p) => p.marks)))
+        .filter((m) => m !== 25 && m !== 30 && m !== 50)
+        .sort((a, b) => a - b),
     [papersQ.data],
   );
 

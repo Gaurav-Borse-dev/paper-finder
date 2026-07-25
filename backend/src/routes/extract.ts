@@ -1025,8 +1025,8 @@ function matchExamType(str: string): "ESE" | "RE-ESE" | "Supplementary" | "Compl
 
 function matchMarks(str: string): number | null {
   // ONLY match total paper marks from header context. Never match sub-question marks.
-  // Valid standard total marks: 30, 40, 50, 60, 65, 70, 75, 80, 100
-  const VALID_TOTAL_MARKS = new Set([30, 40, 50, 60, 65, 70, 75, 80, 100]);
+  // Valid standard total marks: 40, 60, 65, 70, 75, 80, 100
+  const VALID_TOTAL_MARKS = new Set([40, 60, 65, 70, 75, 80, 100]);
   
   const marksPatterns = [
     // "Max. Marks: 60", "Maximum Marks: 80", "Total Marks: 100", "Full Marks: 70"
@@ -1116,7 +1116,7 @@ export function parseFromFilename(filename: string, dynamicAliases?: Record<stri
       .replace(/\b\d{8,}\b/g, "") // long number sequences
       .replace(/\b(?:20)?\d{2}\s*[-/]\s*\d{2}\b/g, "") // academic year ranges like 24-25, 2024-25, 24/25
       .replace(/\b(20\d{2})\s*-?\s*(\d{2})\b/g, "") // academic year
-      .replace(/\b(50|60|65|70|75|80|100)\s*[Mm]?\b/g, "") // marks
+      .replace(/\b(60|65|70|75|80|100)\s*[Mm]?\b/g, "") // marks
       .replace(/\b(?:GR|Group)\s*[A-Z]\b/gi, "") // group markers
       .replace(/\b(?:ODD|EVEN|RE)\b/gi, "")
       .replace(/\b[A-Z]{2,4}\d{3,}[A-Z]?\b/g, "") // course codes like RCP23VCPC301

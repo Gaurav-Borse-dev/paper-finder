@@ -603,7 +603,7 @@ router.post(
                 return endYr === (startYr + 1) % 100;
               };
 
-              const VALID_TOTAL_MARKS = new Set([30, 40, 50, 60, 65, 70, 75, 80, 100]);
+              const VALID_TOTAL_MARKS = new Set([40, 60, 65, 70, 75, 80, 100]);
               const isCorruptedSubj = isCorruptedSubject;
               const isUnknownDept = !p.department || p.department === "Unknown" || !VALID_DEPARTMENTS.includes(p.department);
 
