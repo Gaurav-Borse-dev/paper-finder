@@ -3,8 +3,11 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { Toaster } from "sonner";
+import Clarity from "@microsoft/clarity";
 import { routeTree } from "./routeTree.gen";
 import "./styles.css";
+
+Clarity.init("xtmd1y4hwb");
 
 const queryClient = new QueryClient({
   defaultOptions: {
