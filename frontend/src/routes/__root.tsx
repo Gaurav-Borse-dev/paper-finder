@@ -1,10 +1,13 @@
+import { useEffect } from "react";
 import {
   Outlet,
   Link,
   createRootRouteWithContext,
+  useLocation,
 } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
+import { trackPageView } from "../lib/analytics";
 
 function NotFoundComponent() {
   return (
@@ -63,5 +66,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 });
 
 function RootComponent() {
+  const location = useLocation();
+
+  useEffect(() => {
+    trackPageView(location.href);
+  }, [location.href]);
+
   return <Outlet />;
 }
