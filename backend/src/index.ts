@@ -21,6 +21,22 @@ app.set("trust proxy", 1);
 // ── Security Headers ──
 app.use(helmet());
 
+// ── Health check routes (Placed before rate limiters for UptimeRobot/monitoring) ──
+const healthCheckHandler = (_req: express.Request, res: express.Response) => {
+  res.status(200).json({
+    status: "ok",
+    message: "Paper Finder API is healthy",
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV || "development",
+  });
+};
+
+app.get("/", healthCheckHandler);
+app.get("/health", healthCheckHandler);
+app.get("/ping", healthCheckHandler);
+app.get("/api/health", healthCheckHandler);
+
 // ── Rate Limiting ──
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -95,11 +111,6 @@ app.use("/api/feedback", feedbackLimiter, feedbackRoutes);
 app.use("/api/upload", uploadLimiter, uploadRoutes);
 app.use("/api/extract", uploadLimiter, extractRoutes);
 app.use("/api/import", importRoutes);
-
-// ── Health check ──
-app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
-});
 
 // ── 404 handler ──
 app.use((_req, res) => {
